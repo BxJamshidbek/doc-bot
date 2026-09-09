@@ -200,8 +200,8 @@ def _populate_label_cell(
     # 1. Product Photo (Inline, centered, normal line spacing)
     p_img = cell.paragraphs[0]
     p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p_img.paragraph_format.space_before = Pt(1)
-    p_img.paragraph_format.space_after = Pt(2)
+    p_img.paragraph_format.space_before = Pt(0)
+    p_img.paragraph_format.space_after = Pt(1)
     p_img.paragraph_format.line_spacing = 1.0
 
     photo_path = Path(product.image_path)
@@ -233,13 +233,21 @@ def _populate_label_cell(
     # 2. Product Name (Bold, Centered, normal line spacing)
     p_name = cell.add_paragraph()
     p_name.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p_name.paragraph_format.space_before = Pt(1)
-    p_name.paragraph_format.space_after = Pt(2)
+    p_name.paragraph_format.space_before = Pt(0)
+    p_name.paragraph_format.space_after = Pt(1)
     p_name.paragraph_format.line_spacing = 1.0
 
     r_name = p_name.add_run(product.name)
     r_name.font.name = FONT_NAME
-    name_size = FONT_SIZE_NAME_PT if len(product.name) <= 30 else FONT_SIZE_NAME_PT - 1.0
+    name_len = len(product.name)
+    if name_len <= 24:
+        name_size = FONT_SIZE_NAME_PT
+    elif name_len <= 38:
+        name_size = FONT_SIZE_NAME_PT - 0.6
+    elif name_len <= 54:
+        name_size = FONT_SIZE_NAME_PT - 1.2
+    else:
+        name_size = FONT_SIZE_NAME_PT - 2.0
     r_name.font.size = Pt(name_size)
     r_name.bold = True
     r_name.font.color.rgb = RGBColor(20, 20, 20)
@@ -247,8 +255,8 @@ def _populate_label_cell(
     # 3. Barcode Image (Inline, centered, normal line spacing)
     p_bc = cell.add_paragraph()
     p_bc.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p_bc.paragraph_format.space_before = Pt(1)
-    p_bc.paragraph_format.space_after = Pt(1)
+    p_bc.paragraph_format.space_before = Pt(0)
+    p_bc.paragraph_format.space_after = Pt(0)
     p_bc.paragraph_format.line_spacing = 1.0
 
     # Safe temp barcode filename using sha256 to support slashes, colons, spaces, etc.
@@ -266,7 +274,7 @@ def _populate_label_cell(
     p_code = cell.add_paragraph()
     p_code.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_code.paragraph_format.space_before = Pt(0)
-    p_code.paragraph_format.space_after = Pt(1)
+    p_code.paragraph_format.space_after = Pt(0)
     p_code.paragraph_format.line_spacing = 1.0
 
     r_code = p_code.add_run(product.barcode)

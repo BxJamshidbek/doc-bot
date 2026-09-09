@@ -22,6 +22,10 @@ A Python Telegram bot that generates professional, cashier-ready printable A4 pr
   - Generates DOCX files with light gray cutting guide borders (`#C8C8C8` outer, `#E0E0E0` inner).
   - Converts to PDF automatically if LibreOffice is installed; if not, sends the DOCX and provides a clear installation tip.
   - Preview and final exports use unique filenames so files are not overwritten.
+- **Named Documents & Previous Files**:
+  - `/new` asks for a document name before the first product is collected.
+  - Generated filenames include the document name when available.
+  - `/files` shows recent preview/final documents and lets users download DOCX/PDF again.
 - **Per-User Session Management**:
   - Each Telegram user has an isolated session and directory.
   - Generated DOCX/PDF files are stored separately under `data/generated/<telegram_user_id>/`.
@@ -33,10 +37,10 @@ A Python Telegram bot that generates professional, cashier-ready printable A4 pr
 ## Label Design Specifications
 
 Each label cell contains:
-1. **Product Photo**: Centered horizontally, white background trimmed, aspect ratio preserved (max 48mm × 25mm).
-2. **Product Name**: Centered, bold Arial (8.5pt).
-3. **Barcode Image**: Centered, high-contrast black-on-white with scannable quiet zones (max 46mm × 13mm).
-4. **Barcode Number**: Centered, bold Arial (8.0pt).
+1. **Product Photo**: Centered horizontally, white background trimmed, aspect ratio preserved (max 56mm × 36mm).
+2. **Product Name**: Centered, bold Arial (up to 10.2pt, reduced automatically for long names).
+3. **Barcode Image**: Centered, high-contrast black-on-white with scannable quiet zones (max 56mm × 20mm).
+4. **Barcode Number**: Centered, bold Arial (9.4pt).
 5. **Cutting Guides**: Light gray borders surrounding each label for easy trimming with scissors or a paper cutter.
 
 ---
@@ -133,24 +137,27 @@ By default, the bot starts in polling mode. For webhook deployment, set `BOT_RUN
 | Command | Description |
 | :--- | :--- |
 | `/start` | Displays welcome message, features, and command guide. |
-| `/new` | Clears all products and starts a fresh label sheet. |
+| `/new` | Clears active products, starts a fresh label sheet, and asks for a document name. |
 | `/add` | Initiates the 3-step prompt flow to add a new product. |
 | `/list` | Displays the current ordered list of products and page count. |
 | `/remove <N>` | Removes product number `N` from the sheet (e.g. `/remove 2`). |
 | `/preview` | Generates and sends a preview DOCX/PDF without clearing the list. |
 | `/finish` | Compiles final printable DOCX & PDF files and sends them to the user without clearing the list. |
+| `/files` | Shows previous preview/final documents and lets the user download them again. |
 | `/cancel` | Cancels the current `/add` product input flow. |
 
 > **Note on `/done`**: `/done` is not needed in the active workflow. Products are automatically committed and confirmed immediately after you submit the barcode value.
 
 ### Step-by-Step Flow:
-1. Send `/add`.
-2. **Step 1/3 (Photo)**: Upload a photo of the product (as a photo or uncompressed image document).
-3. **Step 2/3 (Name)**: Type the product name (e.g., `Perexod 76-50mm`).
-4. **Step 3/3 (Barcode)**: Type the barcode or code (e.g., `1000049`, `5901234123457`, or internal code).
+1. Send `/new` and type the document name.
+2. Upload a photo of the first product (as a photo or uncompressed image document).
+3. Type the product name (e.g., `Perexod 76-50mm`).
+4. Type the barcode or code (e.g., `1000049`, `5901234123457`, or internal code).
 5. The product is **automatically saved and confirmed** with its position on the sheet.
-6. Use `/preview` at any time to download a test document without stopping the current list.
-7. Use `/finish` at any time to download the final document. The list is kept; use `/new` only when you want to start a fresh sheet.
+6. Use `/add` to add the next product.
+7. Use `/preview` at any time to download a test document without stopping the current list.
+8. Use `/finish` at any time to download the final document. The list is kept; use `/new` only when you want to start a fresh sheet.
+9. Use `/files` to download previous preview/final documents again while they are still within the retention period.
 
 ### Photo Quality Guidance
 
@@ -211,6 +218,7 @@ Tests cover:
 - Exact barcode encoded-value preservation for codes like `1000049`.
 - EAN-13 checksum validation and fallback to Code128.
 - Ordered session management and product removal.
+- Document naming and previous export history.
 - Unique preview/final export filenames under `data/generated/<telegram_user_id>/`.
 - 30-day cleanup for old generated files and stale drafts.
 - Single-page and multi-page DOCX pagination (12 labels/page).

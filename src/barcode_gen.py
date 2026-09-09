@@ -70,8 +70,8 @@ def generate_barcode_image(
     writer_options = {
         "write_text": False,  # Text is rendered cleanly in Word table
         "quiet_zone": 4.0,    # Scannable quiet zones on left and right
-        "module_height": 14.0,
-        "module_width": 0.28,
+        "module_height": 18.0,
+        "module_width": 0.30,
         "dpi": dpi,
     }
 

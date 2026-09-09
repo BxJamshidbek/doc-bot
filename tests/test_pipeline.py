@@ -208,6 +208,61 @@ class TestSessionManager(unittest.TestCase):
         self.assertNotEqual(first.name, second.name)
         self.assertRegex(first.name, r"^labels_preview_\d{8}_\d{6}_[a-f0-9]{6}\.docx$")
 
+    def test_document_name_prefixes_export_filename(self):
+        session = self.mgr.get_session(12345)
+        session.set_document_name("  Santexnika Perexodlar  ")
+
+        path = session.new_export_docx_path("product_labels")
+
+        self.assertEqual(path.parent, session.generated_dir)
+        self.assertRegex(path.name, r"^santexnika-perexodlar_product_labels_\d{8}_\d{6}_[a-f0-9]{6}\.docx$")
+
+    def test_record_and_list_exports(self):
+        session = self.mgr.get_session(12345)
+        session.set_document_name("Test hujjat")
+        docx_path = session.new_export_docx_path("labels_preview")
+        pdf_path = docx_path.with_suffix(".pdf")
+        docx_path.write_text("dummy docx", encoding="utf-8")
+        pdf_path.write_text("dummy pdf", encoding="utf-8")
+
+        record = session.record_export(
+            kind="preview",
+            docx_path=docx_path,
+            pdf_path=pdf_path,
+            product_count=3,
+            page_count=1,
+        )
+
+        listed = session.list_exports()
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0].export_id, record.export_id)
+        self.assertEqual(listed[0].title, "Test hujjat")
+        self.assertEqual(listed[0].kind, "preview")
+        self.assertEqual(session.get_export(record.export_id).docx_path, str(docx_path.resolve()))
+
+    def test_clear_resets_active_document_but_preserves_export_history(self):
+        session = self.mgr.get_session(12345)
+        session.set_document_name("Mavjud hujjat")
+        docx_path = session.new_export_docx_path("product_labels")
+        docx_path.write_text("dummy docx", encoding="utf-8")
+        record = session.record_export(
+            kind="final",
+            docx_path=docx_path,
+            pdf_path=None,
+            product_count=1,
+            page_count=1,
+        )
+
+        img_file = session.session_dir / "prod.png"
+        img_file.write_text("dummy img")
+        session.add_product("Item 1", "123", str(img_file))
+        session.clear()
+
+        self.assertIsNone(session.document_name)
+        self.assertEqual(len(session.products), 0)
+        self.assertEqual(len(session.list_exports()), 1)
+        self.assertEqual(session.list_exports()[0].export_id, record.export_id)
+
     def test_cleanup_removes_old_exports_and_stale_drafts_only(self):
         session = self.mgr.get_session(12345)
         now = time.time()
@@ -238,6 +293,31 @@ class TestSessionManager(unittest.TestCase):
         self.assertFalse(stale_draft.exists())
         self.assertTrue(new_export.exists())
         self.assertTrue(active_draft.exists())
+
+    def test_cleanup_prunes_expired_export_records(self):
+        session = self.mgr.get_session(12345)
+        session.set_document_name("Eski hujjat")
+        now = time.time()
+        old_ts = now - (31 * 86400)
+        old_docx = session.new_export_docx_path("product_labels")
+        old_docx.write_text("dummy docx", encoding="utf-8")
+        import os
+        os.utime(old_docx, (old_ts, old_ts))
+
+        record = session.record_export(
+            kind="final",
+            docx_path=old_docx,
+            pdf_path=None,
+            product_count=1,
+            page_count=1,
+        )
+        self.assertIsNotNone(session.get_export(record.export_id))
+
+        session.cleanup_expired_files(max_age_days=30, now_ts=now)
+
+        self.assertFalse(old_docx.exists())
+        self.assertIsNone(session.get_export(record.export_id))
+        self.assertEqual(session.list_exports(), [])
 
 
 class TestDocxGeneration(unittest.TestCase):

@@ -67,16 +67,16 @@ COL_WIDTHS_DXA = [int(round(w * 56.6929)) for w in COL_WIDTHS_MM]
 ROW_HEIGHT_DXA = int(round(ROW_HEIGHT_MM * 56.6929))
 
 # Image & Barcode dimension constraints inside label
-MAX_PHOTO_WIDTH_MM = 48.0
-MAX_PHOTO_HEIGHT_MM = 25.0
+MAX_PHOTO_WIDTH_MM = 56.0
+MAX_PHOTO_HEIGHT_MM = 36.0
 
-MAX_BARCODE_WIDTH_MM = 46.0
-MAX_BARCODE_HEIGHT_MM = 15.0
+MAX_BARCODE_WIDTH_MM = 56.0
+MAX_BARCODE_HEIGHT_MM = 20.0
 
 # Typography
 FONT_NAME = "Arial"
-FONT_SIZE_NAME_PT = 8.5
-FONT_SIZE_CODE_PT = 8.0
+FONT_SIZE_NAME_PT = 10.2
+FONT_SIZE_CODE_PT = 9.4
 
 # Border styling for cutting guides
 BORDER_COLOR_OUTER = "C8C8C8"  # Light gray cutting border

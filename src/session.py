@@ -1,6 +1,7 @@
 """User session and product storage management."""
 
 import json
+import re
 import shutil
 import time
 import uuid
@@ -18,11 +19,38 @@ class ProductItem:
     image_path: str
 
 
+@dataclass
+class ExportRecord:
+    export_id: str
+    title: str
+    kind: str
+    docx_path: str
+    pdf_path: Optional[str]
+    product_count: int
+    page_count: int
+    created_at: str
+
+
+def normalize_document_name(value: str) -> str:
+    """Normalizes user-provided document names for display."""
+    return re.sub(r"\s+", " ", str(value or "").strip())[:80].strip()
+
+
+def slugify_document_name(value: str) -> str:
+    """Creates a safe filename stem from a document name."""
+    normalized = normalize_document_name(value).lower()
+    slug = re.sub(r"[^\w.-]+", "-", normalized, flags=re.UNICODE)
+    slug = re.sub(r"-+", "-", slug).strip("-.")
+    return slug[:64] or "hujjat"
+
+
 class UserSession:
     def __init__(self, user_id: int, session_dir: Path, generated_dir: Optional[Path] = None):
         self.user_id = user_id
         self.session_dir = session_dir.resolve()
         self.generated_dir = (generated_dir or (self.session_dir / "generated")).resolve()
+        self.document_name: Optional[str] = None
+        self.exports: List[ExportRecord] = []
         self.products: List[ProductItem] = []
         self.current_draft: Dict[str, Optional[str]] = {
             "photo_path": None,
@@ -69,18 +97,51 @@ class UserSession:
                 for item in data.get("products", [])
                 if Path(item.get("image_path", "")).is_file()
             ]
+            self.document_name = normalize_document_name(data.get("document_name", "")) or None
+            self.exports = [
+                ExportRecord(
+                    export_id=str(item.get("export_id", "")).strip(),
+                    title=normalize_document_name(item.get("title", "")) or "Hujjat",
+                    kind="final" if item.get("kind") == "final" else "preview",
+                    docx_path=str(item.get("docx_path", "")).strip(),
+                    pdf_path=str(item.get("pdf_path", "")).strip() or None,
+                    product_count=int(item.get("product_count") or 0),
+                    page_count=int(item.get("page_count") or 0),
+                    created_at=str(item.get("created_at", "")).strip(),
+                )
+                for item in data.get("exports", [])
+                if str(item.get("export_id", "")).strip()
+            ]
+            self._prune_export_records(save=False)
         except Exception:
             self.products = []
+            self.document_name = None
+            self.exports = []
 
     def _save_state(self) -> None:
         """Persists session state to JSON."""
         self.session_dir.mkdir(parents=True, exist_ok=True)
         data = {
             "user_id": self.user_id,
+            "document_name": self.document_name,
             "products": [asdict(p) for p in self.products],
+            "exports": [asdict(record) for record in self.exports],
         }
         with open(self.state_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def set_document_name(self, name: str) -> str:
+        """Sets the active document name and persists it."""
+        clean_name = normalize_document_name(name)
+        if not clean_name:
+            raise ValueError("Hujjat nomi bo‘sh bo‘lishi mumkin emas.")
+        self.document_name = clean_name
+        self._save_state()
+        return clean_name
+
+    def get_document_title(self) -> str:
+        """Returns the active document title with a safe fallback."""
+        return self.document_name or "Mahsulot yorliqlari"
 
     def add_product(self, name: str, barcode: str, image_path: str) -> int:
         """Adds a product to the ordered list and persists state."""
@@ -119,6 +180,7 @@ class UserSession:
                 pass
 
         self.products.clear()
+        self.document_name = None
         self.reset_draft()
         self._save_state()
         self.cleanup_expired_files()
@@ -126,10 +188,71 @@ class UserSession:
     def new_export_docx_path(self, prefix: str) -> Path:
         """Returns a unique persistent generated DOCX path for preview/final exports."""
         safe_prefix = "product_labels" if prefix == "product_labels" else "labels_preview"
+        title_prefix = f"{slugify_document_name(self.document_name)}_" if self.document_name else ""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         short_id = uuid.uuid4().hex[:6]
         self.generated_dir.mkdir(parents=True, exist_ok=True)
-        return self.generated_dir / f"{safe_prefix}_{timestamp}_{short_id}.docx"
+        return self.generated_dir / f"{title_prefix}{safe_prefix}_{timestamp}_{short_id}.docx"
+
+    def _export_record_has_existing_file(self, record: ExportRecord) -> bool:
+        """Returns True if at least one file in an export record still exists in generated storage."""
+        for raw_path in [record.docx_path, record.pdf_path]:
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            if path.is_file() and self._is_within(path, self.generated_dir):
+                return True
+        return False
+
+    def _prune_export_records(self, save: bool = True) -> None:
+        """Drops export metadata whose files no longer exist."""
+        before = len(self.exports)
+        self.exports = [
+            record
+            for record in self.exports
+            if self._export_record_has_existing_file(record)
+        ]
+        if save and len(self.exports) != before:
+            self._save_state()
+
+    def record_export(
+        self,
+        *,
+        kind: str,
+        docx_path: str | Path,
+        pdf_path: Optional[str | Path],
+        product_count: int,
+        page_count: int,
+    ) -> ExportRecord:
+        """Stores metadata for a generated preview/final document."""
+        record = ExportRecord(
+            export_id=uuid.uuid4().hex[:12],
+            title=self.get_document_title(),
+            kind="final" if kind == "final" else "preview",
+            docx_path=str(Path(docx_path).resolve()),
+            pdf_path=str(Path(pdf_path).resolve()) if pdf_path else None,
+            product_count=int(product_count),
+            page_count=int(page_count),
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        self.exports.insert(0, record)
+        self.exports = self.exports[:100]
+        self._save_state()
+        return record
+
+    def list_exports(self, limit: int = 10) -> List[ExportRecord]:
+        """Returns recent generated documents whose files still exist."""
+        self._prune_export_records()
+        return self.exports[:limit]
+
+    def get_export(self, export_id: str) -> Optional[ExportRecord]:
+        """Finds an export record by id if its files still exist."""
+        self._prune_export_records()
+        normalized_id = str(export_id or "").strip()
+        for record in self.exports:
+            if record.export_id == normalized_id:
+                return record
+        return None
 
     def cleanup_expired_files(
         self,
@@ -170,6 +293,7 @@ class UserSession:
                     self._safe_unlink(f, [self.session_dir, self.generated_dir])
             except Exception:
                 pass
+        self._prune_export_records()
 
     def reset_draft(self) -> None:
         """Resets the in-progress draft item and removes uncommitted draft photos."""
