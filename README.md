@@ -124,9 +124,7 @@ python -m src.bot
 ```
 *(Direct script execution `python src/bot.py` is also supported via a package-path bootstrap).*
 
-The bot will initialize, register UI commands with Telegram, and begin polling for updates.
-
-Polling is the recommended production mode for this bot. Webhook mode is only worth adding if the server has a domain name and HTTPS certificate.
+By default, the bot starts in polling mode. For webhook deployment, set `BOT_RUN_MODE=webhook` and configure the webhook variables shown below.
 
 ---
 
@@ -223,11 +221,11 @@ Tests cover:
 
 ## Server Deployment Notes
 
-Recommended Ubuntu setup:
+Recommended Ubuntu package setup:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip libreoffice git
+sudo apt-get install -y python3 python3-venv python3-pip libreoffice git nginx certbot python3-certbot-nginx
 cd /root
 git clone https://github.com/BxJamshidbek/doc-bot.git "doc bot"
 cd "doc bot"
@@ -238,6 +236,63 @@ cp .env.example .env
 ```
 
 Edit `.env` and set the real Telegram token. Do not commit `.env`.
+
+### Polling mode
+
+Use this when you do not have a domain and HTTPS yet:
+
+```env
+BOT_RUN_MODE=polling
+```
+
+### Webhook mode
+
+Webhook requires a domain or subdomain with DNS `A` record pointing to the server IP.
+
+Example DNS:
+
+```text
+bot.example.com  A  87.192.253.111
+```
+
+Example `.env` values:
+
+```env
+BOT_RUN_MODE=webhook
+WEBHOOK_BASE_URL=https://bot.example.com
+WEBHOOK_PATH=/tg/replace_with_random_path
+WEBHOOK_LISTEN_HOST=127.0.0.1
+WEBHOOK_LISTEN_PORT=8080
+WEBHOOK_SECRET_TOKEN=replace_with_random_secret
+SESSION_DIR=/root/doc bot/data/sessions
+GENERATED_DIR=/root/doc bot/data/generated
+GENERATED_RETENTION_DAYS=30
+CLEANUP_INTERVAL_HOURS=24
+```
+
+Example Nginx reverse proxy:
+
+```nginx
+server {
+    server_name bot.example.com;
+
+    client_max_body_size 50M;
+
+    location /tg/replace_with_random_path {
+        proxy_pass http://127.0.0.1:8080/tg/replace_with_random_path;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+After DNS points to the server, issue HTTPS with:
+
+```bash
+sudo certbot --nginx -d bot.example.com
+```
 
 Example systemd service:
 

@@ -33,6 +33,16 @@ CLEANUP_INTERVAL_HOURS = _env_int("CLEANUP_INTERVAL_HOURS", 24)
 # Incoming phone photos can be very large; downscale before processing to avoid memory spikes.
 MAX_UPLOAD_IMAGE_SIDE_PX = _env_int("MAX_UPLOAD_IMAGE_SIDE_PX", 2400)
 
+# Runtime mode. Use "polling" for simple deployment or "webhook" behind HTTPS/Nginx.
+BOT_RUN_MODE = os.getenv("BOT_RUN_MODE", "polling").strip().lower()
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip().rstrip("/")
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram-webhook").strip() or "/telegram-webhook"
+if not WEBHOOK_PATH.startswith("/"):
+    WEBHOOK_PATH = f"/{WEBHOOK_PATH}"
+WEBHOOK_LISTEN_HOST = os.getenv("WEBHOOK_LISTEN_HOST", "127.0.0.1").strip() or "127.0.0.1"
+WEBHOOK_LISTEN_PORT = _env_int("WEBHOOK_LISTEN_PORT", 8080)
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "").strip()
+
 # Page and Label layout dimensions (A4 standard)
 PAGE_WIDTH_MM = 210.0
 PAGE_HEIGHT_MM = 297.0

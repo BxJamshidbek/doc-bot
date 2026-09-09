@@ -39,6 +39,12 @@ from src.config import (
     GENERATED_BASE_DIR,
     GENERATED_RETENTION_DAYS,
     CLEANUP_INTERVAL_HOURS,
+    BOT_RUN_MODE,
+    WEBHOOK_BASE_URL,
+    WEBHOOK_PATH,
+    WEBHOOK_LISTEN_HOST,
+    WEBHOOK_LISTEN_PORT,
+    WEBHOOK_SECRET_TOKEN,
 )
 from src.session import SessionManager, UserSession
 from src.docx_gen import create_label_sheet
@@ -102,6 +108,19 @@ def safe_image_extension(file_name: Optional[str], mime_type: Optional[str]) -> 
     if suffix in SUPPORTED_IMAGE_EXTENSIONS:
         return suffix
     return IMAGE_MIME_EXTENSIONS.get((mime_type or "").lower(), ".png")
+
+
+def normalize_webhook_path(path: str) -> str:
+    """Normalizes webhook path to '/path' form for Nginx and Telegram."""
+    clean = (path or "/telegram-webhook").strip()
+    if not clean.startswith("/"):
+        clean = f"/{clean}"
+    return clean
+
+
+def build_webhook_public_url(base_url: str, path: str) -> str:
+    """Builds the final public HTTPS webhook URL."""
+    return f"{base_url.strip().rstrip('/')}{normalize_webhook_path(path)}"
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -701,6 +720,34 @@ def create_bot_application() -> object:
 def main() -> None:
     """Bot runner."""
     application = create_bot_application()
+    run_mode = BOT_RUN_MODE.lower()
+
+    if run_mode == "webhook":
+        webhook_path = normalize_webhook_path(WEBHOOK_PATH)
+        if not WEBHOOK_BASE_URL.startswith("https://"):
+            print("ERROR: WEBHOOK_BASE_URL must start with https:// in webhook mode.", file=sys.stderr)
+            sys.exit(1)
+
+        public_url = build_webhook_public_url(WEBHOOK_BASE_URL, webhook_path)
+        logger.info(
+            "Starting Telegram Product Label Bot webhook on %s:%s%s",
+            WEBHOOK_LISTEN_HOST,
+            WEBHOOK_LISTEN_PORT,
+            webhook_path,
+        )
+        application.run_webhook(
+            listen=WEBHOOK_LISTEN_HOST,
+            port=WEBHOOK_LISTEN_PORT,
+            url_path=webhook_path.lstrip("/"),
+            webhook_url=public_url,
+            secret_token=WEBHOOK_SECRET_TOKEN or None,
+        )
+        return
+
+    if run_mode != "polling":
+        print("ERROR: BOT_RUN_MODE must be either 'polling' or 'webhook'.", file=sys.stderr)
+        sys.exit(1)
+
     logger.info("Starting Telegram Product Label Bot polling...")
     application.run_polling()
 

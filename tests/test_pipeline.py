@@ -336,6 +336,15 @@ class TestBotEscaping(unittest.TestCase):
         self.assertEqual(safe_image_extension("bad.png/evil", "image/png"), ".png")
         self.assertEqual(safe_image_extension("vector.svg", None), ".png")
 
+    def test_webhook_url_helpers(self):
+        from src.bot import build_webhook_public_url, normalize_webhook_path
+        self.assertEqual(normalize_webhook_path("tg/secret"), "/tg/secret")
+        self.assertEqual(normalize_webhook_path("/tg/secret"), "/tg/secret")
+        self.assertEqual(
+            build_webhook_public_url("https://labels.example.com/", "tg/secret"),
+            "https://labels.example.com/tg/secret",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
