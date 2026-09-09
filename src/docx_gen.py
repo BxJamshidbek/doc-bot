@@ -44,6 +44,15 @@ from src.image_ops import process_product_image, calculate_fit_dimensions
 from src.barcode_gen import generate_barcode_image
 from src.session import ProductItem
 
+EMPTY_CELL_SPACER_WIDTH_MM = 62.0
+EMPTY_CELL_SPACER_HEIGHT_MM = 0.2
+
+
+def _remove_child_elements(parent, tag_name: str) -> None:
+    """Removes all direct OOXML children with the given qualified tag name."""
+    for child in list(parent.findall(qn(tag_name))):
+        parent.remove(child)
+
 
 def _apply_section_page_setup(section) -> None:
     """Applies A4 page dimensions and margins to a Word section."""
@@ -57,11 +66,27 @@ def _apply_section_page_setup(section) -> None:
 
 def _setup_table_properties(table) -> None:
     """Applies fixed layout and light gray cutting guide borders to the table."""
+    table.autofit = False
     tblPr = table._tbl.tblPr
+
+    total_width_dxa = sum(int(round(w * 56.6929)) for w in COL_WIDTHS_MM)
+
+    # Replace python-docx's default auto width in-place. Some DOCX preview
+    # renderers are sensitive to table-property ordering, so keep w:tblW at
+    # its original position when python-docx already created it.
+    tblW = tblPr.find(qn("w:tblW"))
+    if tblW is None:
+        tblPr.insert(0, parse_xml(f'<w:tblW {nsdecls("w")} w:w="{total_width_dxa}" w:type="dxa"/>'))
+    else:
+        tblW.set(qn("w:w"), str(total_width_dxa))
+        tblW.set(qn("w:type"), "dxa")
+
     # Fixed table layout in OOXML
+    _remove_child_elements(tblPr, "w:tblLayout")
     tblPr.append(parse_xml(f'<w:tblLayout {nsdecls("w")} w:type="fixed"/>'))
 
     # Light gray borders for cutting guides
+    _remove_child_elements(tblPr, "w:tblBorders")
     borders_xml = f"""
         <w:tblBorders {nsdecls("w")}>
             <w:top w:val="single" w:sz="4" w:space="0" w:color="{BORDER_COLOR_OUTER}"/>
@@ -74,15 +99,20 @@ def _setup_table_properties(table) -> None:
     """
     tblPr.append(parse_xml(borders_xml))
 
-    # Explicit column widths in tblGrid
-    tblGrid = table._tbl.find(qn("w:tblGrid"))
-    if tblGrid is None:
-        grid_cols_xml = "".join(
-            f'<w:gridCol {nsdecls("w")} w:w="{int(round(w * 56.6929))}"/>'
-            for w in COL_WIDTHS_MM
-        )
-        grid_element = parse_xml(f'<w:tblGrid {nsdecls("w")}>{grid_cols_xml}</w:tblGrid>')
-        table._tbl.insert(1, grid_element)
+    # Explicit column widths in tblGrid. Always replace the default grid so
+    # renderers cannot keep stale auto-fit measurements from table creation.
+    for tblGrid in list(table._tbl.findall(qn("w:tblGrid"))):
+        table._tbl.remove(tblGrid)
+
+    grid_cols_xml = "".join(
+        f'<w:gridCol {nsdecls("w")} w:w="{int(round(w * 56.6929))}"/>'
+        for w in COL_WIDTHS_MM
+    )
+    grid_element = parse_xml(f'<w:tblGrid {nsdecls("w")}>{grid_cols_xml}</w:tblGrid>')
+    table._tbl.insert(1, grid_element)
+
+    for idx, width_mm in enumerate(COL_WIDTHS_MM):
+        table.columns[idx].width = Mm(width_mm)
 
 
 def _set_cell_properties(cell, width_mm: float) -> None:
@@ -92,12 +122,15 @@ def _set_cell_properties(cell, width_mm: float) -> None:
 
     # Explicit cell width in OOXML w:tcW
     width_dxa = int(round(width_mm * 56.6929))
+    _remove_child_elements(tcPr, "w:tcW")
     tcPr.append(parse_xml(f'<w:tcW {nsdecls("w")} w:w="{width_dxa}" w:type="dxa"/>'))
 
     # Center vertical alignment
+    _remove_child_elements(tcPr, "w:vAlign")
     tcPr.append(parse_xml(f'<w:vAlign {nsdecls("w")} w:val="center"/>'))
 
     # Cell internal padding (dxa)
+    _remove_child_elements(tcPr, "w:tcMar")
     tcPr.append(parse_xml(
         f'<w:tcMar {nsdecls("w")}>'
         f'  <w:top w:w="40" w:type="dxa"/>'
@@ -108,10 +141,56 @@ def _set_cell_properties(cell, width_mm: float) -> None:
     ))
 
 
+def _empty_cell_spacer_path(temp_dir: Path) -> Path:
+    """Returns a reusable transparent spacer image for empty label cells."""
+    spacer_path = temp_dir / "empty_cell_width_spacer.png"
+    if not spacer_path.is_file():
+        Image.new("RGBA", (20, 1), (255, 255, 255, 0)).save(spacer_path)
+    return spacer_path
+
+
+def _add_width_anchor_to_paragraph(paragraph, temp_dir: Path, width_mm: float) -> None:
+    """Adds an invisible inline image that forces preview renderers to keep cell width."""
+    spacer_width = min(EMPTY_CELL_SPACER_WIDTH_MM, max(1.0, width_mm - 1.0))
+    paragraph.add_run().add_picture(
+        str(_empty_cell_spacer_path(temp_dir)),
+        width=Mm(spacer_width),
+        height=Mm(EMPTY_CELL_SPACER_HEIGHT_MM),
+    )
+
+
+def _append_width_anchor_paragraph(cell, temp_dir: Path, width_mm: float) -> None:
+    """Adds a zero-visual-impact width anchor at the end of a populated cell."""
+    p = cell.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(0)
+    p.paragraph_format.line_spacing = 1.0
+    _add_width_anchor_to_paragraph(p, temp_dir, width_mm)
+
+
+def _populate_empty_label_cell(cell, temp_dir: Path, width_mm: float) -> None:
+    """
+    Keeps empty cells visually blank while forcing preview renderers to retain
+    the intended column width. Some DOCX previews collapse completely empty
+    columns even with fixed table widths.
+    """
+    p = cell.paragraphs[0]
+    p.text = ""
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(0)
+    p.paragraph_format.line_spacing = 1.0
+
+    _add_width_anchor_to_paragraph(p, temp_dir, width_mm)
+
+
+
 def _populate_label_cell(
     cell,
     product: ProductItem,
-    temp_dir: Path
+    temp_dir: Path,
+    width_mm: float,
 ) -> None:
     """
     Fills a single cell with product photo, name, barcode, and barcode number.
@@ -196,6 +275,8 @@ def _populate_label_cell(
     r_code.bold = True
     r_code.font.color.rgb = RGBColor(30, 30, 30)
 
+    _append_width_anchor_paragraph(cell, temp_dir, width_mm)
+
 
 def create_label_sheet(
     products: Sequence[ProductItem],
@@ -249,10 +330,10 @@ def create_label_sheet(
 
                 prod_idx = page_start + i
                 if prod_idx < total_products:
-                    _populate_label_cell(cell, products[prod_idx], temp_render_dir)
+                    _populate_label_cell(cell, products[prod_idx], temp_render_dir, COL_WIDTHS_MM[col_idx])
                 else:
                     # Empty cell retains cutting borders
-                    cell.paragraphs[0].text = ""
+                    _populate_empty_label_cell(cell, temp_render_dir, COL_WIDTHS_MM[col_idx])
 
         doc.save(str(output_path))
         return output_path

@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from PIL import Image, ImageDraw
 
-from src.config import LABELS_PER_PAGE, MAX_UPLOAD_IMAGE_SIDE_PX
+from src.config import COL_WIDTHS_DXA, LABELS_PER_PAGE, MAX_UPLOAD_IMAGE_SIDE_PX
 from src.session import SessionManager, ProductItem
 from src.image_ops import (
     trim_white_background,
@@ -268,7 +268,7 @@ class TestDocxGeneration(unittest.TestCase):
 
         # Check label 0 contents
         cell0 = table.cell(0, 0)
-        self.assertEqual(len(cell0.paragraphs), 4)
+        self.assertEqual(len(cell0.paragraphs), 5)
         self.assertEqual(cell0.paragraphs[1].text, "Perexod 76-50mm")
         self.assertEqual(cell0.paragraphs[3].text, "1000049")
 
@@ -277,6 +277,12 @@ class TestDocxGeneration(unittest.TestCase):
         tblLayout = table._tbl.tblPr.find(qn("w:tblLayout"))
         self.assertIsNotNone(tblLayout)
         self.assertEqual(tblLayout.get(qn("w:type")), "fixed")
+        tblW = table._tbl.tblPr.find(qn("w:tblW"))
+        self.assertIsNotNone(tblW)
+        self.assertEqual(tblW.get(qn("w:type")), "dxa")
+        self.assertEqual(int(tblW.get(qn("w:w"))), sum(COL_WIDTHS_DXA))
+        grid_cols = table._tbl.tblGrid.findall(qn("w:gridCol"))
+        self.assertEqual([int(col.get(qn("w:w"))) for col in grid_cols], COL_WIDTHS_DXA)
 
         # Verify no paragraph has fatal 1pt line spacing
         for p in cell0.paragraphs:

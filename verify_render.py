@@ -77,28 +77,26 @@ def _assert_thumbnail_has_content(thumb_path: Path, label: str) -> Path:
     im = Image.open(thumb_path)
     extrema = im.convert("L").getextrema()
     assert extrema[0] < 50, f"Thumbnail appears empty or all-white! Min pixel value: {extrema[0]}"
+    layout_bbox = im.convert("L").point(lambda px: 0 if px >= 248 else 255).getbbox()
+    assert layout_bbox is not None, "Rendered page has no detectable label/table content."
+    content_width = layout_bbox[2] - layout_bbox[0]
+    width_ratio = content_width / im.size[0]
+    assert width_ratio >= 0.80, (
+        f"Rendered label table is too narrow: content spans {width_ratio:.1%} of page width "
+        f"(bbox={layout_bbox}, image_width={im.size[0]})."
+    )
     print(f"  ✓ {label}: {thumb_path.name} ({im.size[0]}x{im.size[1]} px, dark pixels confirmed).")
     return thumb_path
 
 
 def run_visual_thumbnail_check(docx_path: Path, out_dir: Path, pdf_path: Path):
-    """Renders page 1 to PNG on macOS or Linux and checks image visibility."""
-    qlmanage = shutil.which("qlmanage")
-    if qlmanage:
-        subprocess.run(
-            [qlmanage, "-t", "-s", "1200", "-o", str(out_dir), str(docx_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        thumb_path = out_dir / f"{docx_path.name}.png"
-        if thumb_path.is_file():
-            return _assert_thumbnail_has_content(thumb_path, "QuickLook visual thumbnail")
-
+    """Renders page 1 to PNG and checks that label layout spans the page."""
+    checked_thumbnail = None
     pdftoppm = shutil.which("pdftoppm")
     if pdftoppm:
         out_prefix = out_dir / f"{pdf_path.stem}_page1"
+        thumb_path = out_prefix.with_suffix(".png")
+        thumb_path.unlink(missing_ok=True)
         subprocess.run(
             [pdftoppm, "-png", "-singlefile", "-f", "1", "-r", "144", str(pdf_path), str(out_prefix)],
             stdout=subprocess.PIPE,
@@ -106,9 +104,25 @@ def run_visual_thumbnail_check(docx_path: Path, out_dir: Path, pdf_path: Path):
             text=True,
             check=True,
         )
-        thumb_path = out_prefix.with_suffix(".png")
         if thumb_path.is_file():
-            return _assert_thumbnail_has_content(thumb_path, "Poppler visual thumbnail")
+            checked_thumbnail = _assert_thumbnail_has_content(thumb_path, "Poppler PDF visual render")
+
+    qlmanage = shutil.which("qlmanage")
+    if qlmanage:
+        thumb_path = out_dir / f"{docx_path.name}.png"
+        thumb_path.unlink(missing_ok=True)
+        subprocess.run(
+            [qlmanage, "-t", "-s", "1200", "-o", str(out_dir), str(docx_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if thumb_path.is_file():
+            checked_thumbnail = _assert_thumbnail_has_content(thumb_path, "QuickLook DOCX visual thumbnail")
+
+    if checked_thumbnail is not None:
+        return checked_thumbnail
 
     raise RuntimeError("No visual renderer found. Install poppler-utils on Linux or use macOS QuickLook.")
 
