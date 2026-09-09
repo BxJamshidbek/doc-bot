@@ -44,6 +44,24 @@ def slugify_document_name(value: str) -> str:
     return slug[:64] or "hujjat"
 
 
+def document_title_from_export_filename(path: Path) -> str:
+    """Infers a readable title from an existing generated DOCX/PDF filename."""
+    stem = path.stem
+    title_stem = re.sub(
+        r"[-_](product_labels|labels_preview)_\d{8}_\d{6}_[a-f0-9]{6}$",
+        "",
+        stem,
+    )
+    if title_stem == stem:
+        title_stem = re.sub(
+            r"^(product_labels|labels_preview)_\d{8}_\d{6}_[a-f0-9]{6}$",
+            "",
+            stem,
+        )
+    title = normalize_document_name(title_stem.replace("-", " ").replace("_", " "))
+    return title or "Mahsulot yorliqlari"
+
+
 class UserSession:
     def __init__(self, user_id: int, session_dir: Path, generated_dir: Optional[Path] = None):
         self.user_id = user_id
@@ -112,7 +130,7 @@ class UserSession:
                 for item in data.get("exports", [])
                 if str(item.get("export_id", "")).strip()
             ]
-            self._prune_export_records(save=False)
+            self._sync_export_records(save=False)
         except Exception:
             self.products = []
             self.document_name = None
@@ -196,11 +214,12 @@ class UserSession:
 
     def _export_record_has_existing_file(self, record: ExportRecord) -> bool:
         """Returns True if at least one file in an export record still exists in generated storage."""
+        allowed_dirs = [self.generated_dir, self.session_dir]
         for raw_path in [record.docx_path, record.pdf_path]:
             if not raw_path:
                 continue
             path = Path(raw_path)
-            if path.is_file() and self._is_within(path, self.generated_dir):
+            if path.is_file() and any(self._is_within(path, base_dir) for base_dir in allowed_dirs):
                 return True
         return False
 
@@ -213,6 +232,65 @@ class UserSession:
             if self._export_record_has_existing_file(record)
         ]
         if save and len(self.exports) != before:
+            self._save_state()
+
+    def _import_existing_export_files(self) -> bool:
+        """Adds generated DOCX files that pre-date export metadata to history."""
+        search_dirs = [self.generated_dir, self.session_dir]
+        existing_dirs = [directory for directory in search_dirs if directory.is_dir()]
+        if not existing_dirs:
+            return False
+
+        known_docx_paths = {
+            Path(record.docx_path).resolve()
+            for record in self.exports
+            if record.docx_path
+        }
+        imported: List[ExportRecord] = []
+        candidates = []
+        for directory in existing_dirs:
+            candidates.extend(directory.glob("*.docx"))
+
+        for docx_path in sorted(candidates, key=lambda p: p.stat().st_mtime if p.is_file() else 0, reverse=True):
+            try:
+                resolved_docx = docx_path.resolve()
+                if resolved_docx in known_docx_paths:
+                    continue
+                if not any(self._is_within(resolved_docx, base_dir) for base_dir in search_dirs):
+                    continue
+
+                pdf_path = resolved_docx.with_suffix(".pdf")
+                pdf_value = str(pdf_path) if pdf_path.is_file() else None
+                kind = "final" if "product_labels" in resolved_docx.stem else "preview"
+                imported.append(
+                    ExportRecord(
+                        export_id=uuid.uuid5(uuid.NAMESPACE_URL, str(resolved_docx)).hex[:12],
+                        title=document_title_from_export_filename(resolved_docx),
+                        kind=kind,
+                        docx_path=str(resolved_docx),
+                        pdf_path=pdf_value,
+                        product_count=0,
+                        page_count=0,
+                        created_at=datetime.fromtimestamp(resolved_docx.stat().st_mtime).isoformat(timespec="seconds"),
+                    )
+                )
+                known_docx_paths.add(resolved_docx)
+            except Exception:
+                continue
+
+        if imported:
+            self.exports.extend(imported)
+            self.exports.sort(key=lambda record: record.created_at, reverse=True)
+            self.exports = self.exports[:100]
+            return True
+        return False
+
+    def _sync_export_records(self, save: bool = True) -> None:
+        """Keeps export history aligned with generated files on disk."""
+        before = [asdict(record) for record in self.exports]
+        self._prune_export_records(save=False)
+        self._import_existing_export_files()
+        if save and [asdict(record) for record in self.exports] != before:
             self._save_state()
 
     def record_export(
@@ -242,12 +320,12 @@ class UserSession:
 
     def list_exports(self, limit: int = 10) -> List[ExportRecord]:
         """Returns recent generated documents whose files still exist."""
-        self._prune_export_records()
+        self._sync_export_records()
         return self.exports[:limit]
 
     def get_export(self, export_id: str) -> Optional[ExportRecord]:
         """Finds an export record by id if its files still exist."""
-        self._prune_export_records()
+        self._sync_export_records()
         normalized_id = str(export_id or "").strip()
         for record in self.exports:
             if record.export_id == normalized_id:

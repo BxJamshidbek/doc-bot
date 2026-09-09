@@ -542,6 +542,16 @@ def format_export_created_at(record: ExportRecord) -> str:
     return record.created_at.replace("T", " ")[:16]
 
 
+def format_export_details(record: ExportRecord) -> str:
+    """Formats product/page counts, including legacy files without metadata."""
+    details = []
+    if record.product_count > 0:
+        details.append(f"{record.product_count} ta mahsulot")
+    if record.page_count > 0:
+        details.append(f"{record.page_count} bet")
+    return " | ".join(details) if details else "ma’lumot noma’lum"
+
+
 def build_exports_keyboard(records: list[ExportRecord]) -> InlineKeyboardMarkup:
     """Builds inline keyboard for downloading previous exports."""
     buttons = []
@@ -570,9 +580,10 @@ async def send_export_record_documents(
     sent_any = False
     kind_label = export_kind_label(record.kind)
     title = esc(record.title)
+    allowed_export_dirs = [session.generated_dir, session.session_dir]
 
     docx_path = Path(record.docx_path)
-    if docx_path.is_file() and UserSession._is_within(docx_path, session.generated_dir):
+    if docx_path.is_file() and any(UserSession._is_within(docx_path, base_dir) for base_dir in allowed_export_dirs):
         with open(docx_path, "rb") as f_docx:
             await context.bot.send_document(
                 chat_id=chat_id,
@@ -580,7 +591,7 @@ async def send_export_record_documents(
                 filename=docx_path.name,
                 caption=(
                     f"📄 *{kind_label} DOCX:* {title}\n"
-                    f"• {record.product_count} ta mahsulot | {record.page_count} bet"
+                    f"• {esc(format_export_details(record))}"
                 ),
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -588,7 +599,7 @@ async def send_export_record_documents(
 
     if record.pdf_path:
         pdf_path = Path(record.pdf_path)
-        if pdf_path.is_file() and UserSession._is_within(pdf_path, session.generated_dir):
+        if pdf_path.is_file() and any(UserSession._is_within(pdf_path, base_dir) for base_dir in allowed_export_dirs):
             with open(pdf_path, "rb") as f_pdf:
                 await context.bot.send_document(
                     chat_id=chat_id,
@@ -769,7 +780,7 @@ async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for index, record in enumerate(records, start=1):
         lines.append(
             f"{index}. *{esc(record.title)}* — {export_kind_label(record.kind)}\n"
-            f"   {record.product_count} ta mahsulot | {record.page_count} bet | {esc(format_export_created_at(record))}"
+            f"   {esc(format_export_details(record))} | {esc(format_export_created_at(record))}"
         )
     lines.append("\nKerakli hujjatni qayta yuklab olish uchun pastdagi tugmani bosing.")
 

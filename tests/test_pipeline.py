@@ -4,6 +4,7 @@ import unittest
 import tempfile
 import shutil
 import time
+import os
 from pathlib import Path
 from PIL import Image, ImageDraw
 
@@ -240,6 +241,35 @@ class TestSessionManager(unittest.TestCase):
         self.assertEqual(listed[0].kind, "preview")
         self.assertEqual(session.get_export(record.export_id).docx_path, str(docx_path.resolve()))
 
+    def test_existing_generated_files_are_imported_to_history(self):
+        session = self.mgr.get_session(12345)
+        old_docx = session.generated_dir / "oldingi-hujjat_labels_preview_20260909_120000_abc123.docx"
+        old_pdf = old_docx.with_suffix(".pdf")
+        old_docx.write_text("dummy docx", encoding="utf-8")
+        old_pdf.write_text("dummy pdf", encoding="utf-8")
+
+        listed = session.list_exports()
+
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0].title, "oldingi hujjat")
+        self.assertEqual(listed[0].kind, "preview")
+        self.assertEqual(listed[0].docx_path, str(old_docx.resolve()))
+        self.assertEqual(listed[0].pdf_path, str(old_pdf.resolve()))
+        self.assertEqual(listed[0].product_count, 0)
+        self.assertEqual(listed[0].page_count, 0)
+
+    def test_existing_legacy_session_files_are_imported_to_history(self):
+        session = self.mgr.get_session(12345)
+        old_docx = session.session_dir / "legacy-product_labels_20260909_120000_abc123.docx"
+        old_docx.write_text("dummy docx", encoding="utf-8")
+
+        listed = session.list_exports()
+
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0].title, "legacy")
+        self.assertEqual(listed[0].kind, "final")
+        self.assertEqual(listed[0].docx_path, str(old_docx.resolve()))
+
     def test_clear_resets_active_document_but_preserves_export_history(self):
         session = self.mgr.get_session(12345)
         session.set_document_name("Mavjud hujjat")
@@ -279,11 +309,9 @@ class TestSessionManager(unittest.TestCase):
 
         for path in [old_export, stale_draft]:
             time_tuple = (old_ts, old_ts)
-            import os
             os.utime(path, time_tuple)
         for path in [new_export, active_draft]:
             time_tuple = (new_ts, new_ts)
-            import os
             os.utime(path, time_tuple)
 
         session.current_draft["photo_path"] = str(active_draft)
@@ -301,7 +329,6 @@ class TestSessionManager(unittest.TestCase):
         old_ts = now - (31 * 86400)
         old_docx = session.new_export_docx_path("product_labels")
         old_docx.write_text("dummy docx", encoding="utf-8")
-        import os
         os.utime(old_docx, (old_ts, old_ts))
 
         record = session.record_export(
