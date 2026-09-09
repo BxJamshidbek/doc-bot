@@ -2,11 +2,13 @@
 
 import json
 import shutil
+import time
 import uuid
+from datetime import datetime
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Optional, Dict
-from src.config import SESSION_BASE_DIR
+from src.config import SESSION_BASE_DIR, GENERATED_BASE_DIR, GENERATED_RETENTION_DAYS
 
 
 @dataclass
@@ -17,9 +19,10 @@ class ProductItem:
 
 
 class UserSession:
-    def __init__(self, user_id: int, session_dir: Path):
+    def __init__(self, user_id: int, session_dir: Path, generated_dir: Optional[Path] = None):
         self.user_id = user_id
-        self.session_dir = session_dir
+        self.session_dir = session_dir.resolve()
+        self.generated_dir = (generated_dir or (self.session_dir / "generated")).resolve()
         self.products: List[ProductItem] = []
         self.current_draft: Dict[str, Optional[str]] = {
             "photo_path": None,
@@ -27,7 +30,28 @@ class UserSession:
             "barcode": None,
         }
         self.state_file = self.session_dir / "session.json"
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self.generated_dir.mkdir(parents=True, exist_ok=True)
         self._load_state()
+
+    @staticmethod
+    def _is_within(path: Path, base_dir: Path) -> bool:
+        """Returns True only when path resolves inside base_dir."""
+        try:
+            path.resolve().relative_to(base_dir.resolve())
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _safe_unlink(path: Path, allowed_base_dirs: List[Path]) -> None:
+        """Deletes one file only when it is inside an allowed bot-owned directory."""
+        resolved = path.resolve()
+        if not resolved.is_file():
+            return
+        if not any(UserSession._is_within(resolved, base_dir) for base_dir in allowed_base_dirs):
+            return
+        resolved.unlink(missing_ok=True)
 
     def _load_state(self) -> None:
         """Loads saved session from JSON if available."""
@@ -73,7 +97,7 @@ class UserSession:
             try:
                 p = Path(removed.image_path)
                 if p.is_file() and self.session_dir in p.parents:
-                    p.unlink(missing_ok=True)
+                    self._safe_unlink(p, [self.session_dir])
             except Exception:
                 pass
             self._save_state()
@@ -90,29 +114,62 @@ class UserSession:
             try:
                 p = Path(prod.image_path)
                 if p.is_file() and self.session_dir in p.parents:
-                    p.unlink(missing_ok=True)
+                    self._safe_unlink(p, [self.session_dir])
             except Exception:
                 pass
 
         self.products.clear()
         self.reset_draft()
         self._save_state()
-        self.cleanup_expired_files(max_age_days=30)
+        self.cleanup_expired_files()
 
-    def cleanup_expired_files(self, max_age_days: int = 30) -> None:
-        """Cleans up export documents older than max_age_days."""
-        if not self.session_dir.is_dir():
-            return
-        import time
-        now = time.time()
+    def new_export_docx_path(self, prefix: str) -> Path:
+        """Returns a unique persistent generated DOCX path for preview/final exports."""
+        safe_prefix = "product_labels" if prefix == "product_labels" else "labels_preview"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        short_id = uuid.uuid4().hex[:6]
+        self.generated_dir.mkdir(parents=True, exist_ok=True)
+        return self.generated_dir / f"{safe_prefix}_{timestamp}_{short_id}.docx"
+
+    def cleanup_expired_files(
+        self,
+        max_age_days: int = GENERATED_RETENTION_DAYS,
+        now_ts: Optional[float] = None,
+    ) -> None:
+        """
+        Cleans old generated documents and stale draft/temp files.
+        Active product images and the active draft image are preserved.
+        """
+        now = time.time() if now_ts is None else now_ts
         max_age_sec = max_age_days * 86400
-        for f in self.session_dir.glob("*.*"):
-            if f.suffix.lower() in [".docx", ".pdf"]:
-                try:
-                    if now - f.stat().st_mtime > max_age_sec:
-                        f.unlink(missing_ok=True)
-                except Exception:
-                    pass
+        active_paths = {
+            Path(prod.image_path).resolve()
+            for prod in self.products
+            if prod.image_path
+        }
+        draft_photo = self.current_draft.get("photo_path")
+        if draft_photo:
+            active_paths.add(Path(draft_photo).resolve())
+
+        cleanup_targets = []
+        if self.generated_dir.is_dir():
+            cleanup_targets.extend(self.generated_dir.glob("*.*"))
+        if self.session_dir.is_dir():
+            cleanup_targets.extend(self.session_dir.glob("*.*"))
+
+        for f in cleanup_targets:
+            try:
+                if not f.is_file() or f.resolve() in active_paths:
+                    continue
+                if now - f.stat().st_mtime <= max_age_sec:
+                    continue
+                suffix = f.suffix.lower()
+                is_export = suffix in {".docx", ".pdf"}
+                is_stale_session_file = f.name.startswith("draft_") or f.name == "temp_check.png"
+                if is_export or is_stale_session_file:
+                    self._safe_unlink(f, [self.session_dir, self.generated_dir])
+            except Exception:
+                pass
 
     def reset_draft(self) -> None:
         """Resets the in-progress draft item and removes uncommitted draft photos."""
@@ -122,7 +179,7 @@ class UserSession:
                 p = Path(draft_photo)
                 # Check if it's not referenced in any committed product
                 if not any(prod.image_path == str(p) for prod in self.products):
-                    p.unlink(missing_ok=True)
+                    self._safe_unlink(p, [self.session_dir])
             except Exception:
                 pass
         self.current_draft = {"photo_path": None, "name": None, "barcode": None}
@@ -131,17 +188,25 @@ class UserSession:
 class SessionManager:
     """Manages sessions for all users."""
 
-    def __init__(self, base_dir: Path = SESSION_BASE_DIR):
-        self.base_dir = base_dir
+    def __init__(
+        self,
+        base_dir: Path = SESSION_BASE_DIR,
+        generated_base_dir: Path = GENERATED_BASE_DIR,
+    ):
+        self.base_dir = base_dir.resolve()
+        self.generated_base_dir = generated_base_dir.resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.generated_base_dir.mkdir(parents=True, exist_ok=True)
         self._sessions: Dict[int, UserSession] = {}
 
     def get_session(self, user_id: int) -> UserSession:
         """Gets or initializes the user's session."""
         if user_id not in self._sessions:
             user_dir = self.base_dir / str(user_id)
+            generated_dir = self.generated_base_dir / str(user_id)
             user_dir.mkdir(parents=True, exist_ok=True)
-            self._sessions[user_id] = UserSession(user_id, user_dir)
+            generated_dir.mkdir(parents=True, exist_ok=True)
+            self._sessions[user_id] = UserSession(user_id, user_dir, generated_dir)
         return self._sessions[user_id]
 
     def save_draft_photo(self, user_id: int, file_bytes: bytes, ext: str = ".jpg") -> str:
@@ -152,3 +217,20 @@ class SessionManager:
         with open(target_path, "wb") as f:
             f.write(file_bytes)
         return str(target_path)
+
+    def cleanup_all_expired_files(self, max_age_days: int = GENERATED_RETENTION_DAYS) -> None:
+        """Runs retention cleanup for all known session/generated user directories."""
+        user_ids = {
+            int(p.name)
+            for p in self.base_dir.iterdir()
+            if p.is_dir() and p.name.isdigit()
+        }
+        user_ids.update(
+            int(p.name)
+            for p in self.generated_base_dir.iterdir()
+            if p.is_dir() and p.name.isdigit()
+        )
+
+        for user_id in user_ids:
+            session = self.get_session(user_id)
+            session.cleanup_expired_files(max_age_days=max_age_days)

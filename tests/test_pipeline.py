@@ -3,10 +3,11 @@
 import unittest
 import tempfile
 import shutil
+import time
 from pathlib import Path
 from PIL import Image, ImageDraw
 
-from src.config import LABELS_PER_PAGE
+from src.config import LABELS_PER_PAGE, MAX_UPLOAD_IMAGE_SIDE_PX
 from src.session import SessionManager, ProductItem
 from src.image_ops import (
     trim_white_background,
@@ -39,6 +40,36 @@ class TestImageOps(unittest.TestCase):
         draw.rectangle([50, 50, 150, 150], fill=(255, 255, 255))
         cropped = trim_white_background(img)
         self.assertEqual(cropped.size, (200, 200))
+
+    def test_large_phone_photo_is_downscaled(self):
+        temp_dir = Path(tempfile.mkdtemp())
+        try:
+            src = temp_dir / "large_phone_photo.jpg"
+            out = temp_dir / "processed.png"
+            img = Image.new("RGB", (3200, 2200), (80, 90, 100))
+            img.save(src)
+
+            width, height = process_product_image(src, out)
+            self.assertTrue(out.is_file())
+            self.assertLessEqual(max(width, height), MAX_UPLOAD_IMAGE_SIDE_PX)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_phone_exif_orientation_is_normalized(self):
+        temp_dir = Path(tempfile.mkdtemp())
+        try:
+            src = temp_dir / "rotated_phone_photo.jpg"
+            out = temp_dir / "processed.png"
+            img = Image.new("RGB", (60, 120), (80, 90, 100))
+            exif = Image.Exif()
+            exif[274] = 6  # Rotate 90 degrees
+            img.save(src, exif=exif)
+
+            width, height = process_product_image(src, out)
+            self.assertTrue(out.is_file())
+            self.assertGreater(width, height)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_fit_dimensions_no_distortion(self):
         # 400x200 image (aspect 2:1) into max 50x25 mm
@@ -111,7 +142,9 @@ class TestBarcodeGen(unittest.TestCase):
 class TestSessionManager(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
-        self.mgr = SessionManager(self.temp_dir)
+        self.session_base = self.temp_dir / "sessions"
+        self.generated_base = self.temp_dir / "generated"
+        self.mgr = SessionManager(self.session_base, self.generated_base)
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -164,6 +197,47 @@ class TestSessionManager(unittest.TestCase):
         # Generated docx and pdf PRESERVED
         self.assertTrue(doc_file.is_file())
         self.assertTrue(pdf_file.is_file())
+
+    def test_unique_export_paths_are_in_generated_dir(self):
+        session = self.mgr.get_session(12345)
+        first = session.new_export_docx_path("labels_preview")
+        second = session.new_export_docx_path("labels_preview")
+
+        self.assertEqual(first.parent, session.generated_dir)
+        self.assertEqual(second.parent, session.generated_dir)
+        self.assertNotEqual(first.name, second.name)
+        self.assertRegex(first.name, r"^labels_preview_\d{8}_\d{6}_[a-f0-9]{6}\.docx$")
+
+    def test_cleanup_removes_old_exports_and_stale_drafts_only(self):
+        session = self.mgr.get_session(12345)
+        now = time.time()
+        old_ts = now - (31 * 86400)
+        new_ts = now - (29 * 86400)
+
+        old_export = session.generated_dir / "old.docx"
+        new_export = session.generated_dir / "new.pdf"
+        stale_draft = session.session_dir / "draft_old.jpg"
+        active_draft = session.session_dir / "draft_active.jpg"
+
+        for path in [old_export, new_export, stale_draft, active_draft]:
+            path.write_text("dummy", encoding="utf-8")
+
+        for path in [old_export, stale_draft]:
+            time_tuple = (old_ts, old_ts)
+            import os
+            os.utime(path, time_tuple)
+        for path in [new_export, active_draft]:
+            time_tuple = (new_ts, new_ts)
+            import os
+            os.utime(path, time_tuple)
+
+        session.current_draft["photo_path"] = str(active_draft)
+        session.cleanup_expired_files(max_age_days=30, now_ts=now)
+
+        self.assertFalse(old_export.exists())
+        self.assertFalse(stale_draft.exists())
+        self.assertTrue(new_export.exists())
+        self.assertTrue(active_draft.exists())
 
 
 class TestDocxGeneration(unittest.TestCase):

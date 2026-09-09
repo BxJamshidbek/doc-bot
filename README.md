@@ -15,14 +15,18 @@ A Python Telegram bot that generates professional, cashier-ready printable A4 pr
   - Includes certified quiet-zone margins and 300 DPI rendering for laser/inkjet cashier scanners.
 - **Automatic White Background Trimming**:
   - Automatically detects and crops white or near-white borders around products using pure Pillow image operations.
+  - Normalizes smartphone EXIF orientation and downscales very large phone photos before processing.
   - Transparent PNGs are cleanly flattened and trimmed.
   - Proportional scaling ensures product images are never stretched or distorted.
 - **Dual Export (DOCX & PDF)**:
   - Generates DOCX files with light gray cutting guide borders (`#C8C8C8` outer, `#E0E0E0` inner).
   - Converts to PDF automatically if LibreOffice is installed; if not, sends the DOCX and provides a clear installation tip.
+  - Preview and final exports use unique filenames so files are not overwritten.
 - **Per-User Session Management**:
   - Each Telegram user has an isolated session and directory.
-  - Temporary files and drafts are safely cleaned up upon `/new` or `/cancel`.
+  - Generated DOCX/PDF files are stored separately under `data/generated/<telegram_user_id>/`.
+  - `/new` clears the active product list but keeps generated DOCX/PDF files until the retention cleanup removes them.
+  - Generated files and stale drafts older than 30 days are cleaned automatically.
 
 ---
 
@@ -100,7 +104,14 @@ Each label cell contains:
    Open `.env` in your editor and set:
    ```env
    TELEGRAM_BOT_TOKEN=your_bot_token_here
+   SESSION_DIR=data/sessions
+   GENERATED_DIR=data/generated
+   GENERATED_RETENTION_DAYS=30
+   CLEANUP_INTERVAL_HOURS=24
+   MAX_UPLOAD_IMAGE_SIDE_PX=2400
    ```
+
+   On a server, keep `SESSION_DIR` and `GENERATED_DIR` on persistent disk, not in a temporary directory.
 
 ---
 
@@ -115,6 +126,8 @@ python -m src.bot
 
 The bot will initialize, register UI commands with Telegram, and begin polling for updates.
 
+Polling is the recommended production mode for this bot. Webhook mode is only worth adding if the server has a domain name and HTTPS certificate.
+
 ---
 
 ## Bot Commands & Usage Guide
@@ -127,7 +140,7 @@ The bot will initialize, register UI commands with Telegram, and begin polling f
 | `/list` | Displays the current ordered list of products and page count. |
 | `/remove <N>` | Removes product number `N` from the sheet (e.g. `/remove 2`). |
 | `/preview` | Generates and sends a preview DOCX/PDF without clearing the list. |
-| `/finish` | Compiles final printable DOCX & PDF files and sends them to the user. |
+| `/finish` | Compiles final printable DOCX & PDF files and sends them to the user without clearing the list. |
 | `/cancel` | Cancels the current `/add` product input flow. |
 
 > **Note on `/done`**: `/done` is not needed in the active workflow. Products are automatically committed and confirmed immediately after you submit the barcode value.
@@ -138,7 +151,18 @@ The bot will initialize, register UI commands with Telegram, and begin polling f
 3. **Step 2/3 (Name)**: Type the product name (e.g., `Perexod 76-50mm`).
 4. **Step 3/3 (Barcode)**: Type the barcode or code (e.g., `1000049`, `5901234123457`, or internal code).
 5. The product is **automatically saved and confirmed** with its position on the sheet.
-6. Repeat `/add` for more products, or send `/finish` to generate your printable label sheet.
+6. Use `/preview` at any time to download a test document without stopping the current list.
+7. Use `/finish` at any time to download the final document. The list is kept; use `/new` only when you want to start a fresh sheet.
+
+### Photo Quality Guidance
+
+The bot accepts normal phone photos. For best results:
+- Put the product on a white or light background.
+- Keep the product centered and well lit.
+- Avoid strong shadows and busy backgrounds.
+- Send the image as a file/document when you want Telegram to avoid compressing it.
+
+The bot preserves the image aspect ratio, corrects phone rotation metadata, trims white borders when safe, and fits the product into the label without stretching.
 
 ---
 
@@ -183,13 +207,64 @@ python -m unittest tests/test_pipeline.py
 
 Tests cover:
 - White-background trimming and transparency handling.
+- Smartphone orientation normalization and large-photo downscaling.
 - Fit dimension scaling without distortion.
 - Code128 generation for short codes.
+- Exact barcode encoded-value preservation for codes like `1000049`.
 - EAN-13 checksum validation and fallback to Code128.
 - Ordered session management and product removal.
+- Unique preview/final export filenames under `data/generated/<telegram_user_id>/`.
+- 30-day cleanup for old generated files and stale drafts.
 - Single-page and multi-page DOCX pagination (12 labels/page).
 - Fixed table layout and absence of 1pt line clipping.
 - Markdown special character escaping.
+
+---
+
+## Server Deployment Notes
+
+Recommended Ubuntu setup:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv python3-pip libreoffice git
+cd /root
+git clone https://github.com/BxJamshidbek/doc-bot.git "doc bot"
+cd "doc bot"
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Edit `.env` and set the real Telegram token. Do not commit `.env`.
+
+Example systemd service:
+
+```ini
+[Unit]
+Description=Product Label Telegram Bot
+After=network.target
+
+[Service]
+WorkingDirectory=/root/doc bot
+EnvironmentFile=/root/doc bot/.env
+ExecStart=/root/doc bot/.venv/bin/python -m src.bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+After saving the service file:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable doc-bot
+sudo systemctl start doc-bot
+sudo systemctl status doc-bot
+```
 
 ---
 

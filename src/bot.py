@@ -3,8 +3,6 @@
 import asyncio
 import logging
 import sys
-import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -35,7 +33,13 @@ from telegram.warnings import PTBUserWarning
 import warnings
 warnings.filterwarnings("ignore", category=PTBUserWarning)
 
-from src.config import TELEGRAM_BOT_TOKEN, SESSION_BASE_DIR
+from src.config import (
+    TELEGRAM_BOT_TOKEN,
+    SESSION_BASE_DIR,
+    GENERATED_BASE_DIR,
+    GENERATED_RETENTION_DAYS,
+    CLEANUP_INTERVAL_HOURS,
+)
 from src.session import SessionManager, UserSession
 from src.docx_gen import create_label_sheet
 from src.pdf_converter import convert_docx_to_pdf
@@ -52,7 +56,7 @@ logger = logging.getLogger(__name__)
 STATE_WAITING_PHOTO, STATE_WAITING_NAME, STATE_WAITING_BARCODE = range(3)
 
 # Global session manager
-session_mgr = SessionManager(SESSION_BASE_DIR)
+session_mgr = SessionManager(SESSION_BASE_DIR, GENERATED_BASE_DIR)
 
 SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 IMAGE_MIME_EXTENSIONS = {
@@ -103,16 +107,16 @@ def safe_image_extension(file_name: Optional[str], mime_type: Optional[str]) -> 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles /start command: explains usage and features."""
     help_text = (
-        "🏷️ *Welcome to the Product Label Sheet Bot!*\n\n"
-        "I generate clean, printable A4 label sheets arranged in a *3 × 4 grid* (12 labels per page).\n"
-        "Siz istalgancha (hatto 1 ta) mahsulot qo‘shib, darhol DOCX/PDF hujjatni yuklab olishingiz mumkin!\n\n"
-        "*Each label includes:*\n"
-        "• Centered product photo (auto-crops white background)\n"
-        "• Bold centered product name\n"
-        "• High-resolution scannable barcode (Code128 / EAN-13)\n"
-        "• Barcode number text\n"
-        "• Light gray cutting guidelines\n\n"
-        "📋 *Workflow:*\n"
+        "🏷️ *Mahsulot yorlig‘i botiga xush kelibsiz!*\n\n"
+        "Men A4 formatda *3 × 4 grid* bo‘yicha, ya’ni har betga 12 ta yorliq qilib DOCX/PDF hujjat tayyorlayman.\n"
+        "Siz hatto 1 ta mahsulot qo‘shib ham darhol preview yoki final hujjatni yuklab olishingiz mumkin.\n\n"
+        "*Har bir yorliqda:*\n"
+        "• mahsulot rasmi markazda joylashadi\n"
+        "• mahsulot nomi qalin yoziladi\n"
+        "• Code128 / EAN-13 barcode yaratiladi\n"
+        "• barcode raqami alohida ko‘rsatiladi\n"
+        "• kesish uchun yengil chiziqlar bo‘ladi\n\n"
+        "📋 *Ish tartibi:*\n"
         "1. /add bosing yoki *[➕ Keyingi mahsulot]* tugmasini bosing\n"
         "2. *Rasm* ➔ *Nomi* ➔ *Barcode* yuboring\n"
         "3. Mahsulot avtomatik saqlanadi!\n"
@@ -236,7 +240,8 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = (
         "📸 *1/3-qadam: Mahsulot fotosi*\n\n"
         "Iltimos, mahsulot rasmini yuboring.\n"
-        "_(Oq fon avtomatik qirqiladi. Siqilmagan rasm ko‘rinishida ham yuborishingiz mumkin.)_\n\n"
+        "Mahsulotni oq yoki yengil fonda, yaxshi yorug‘likda, kadr markaziga olib rasmga oling.\n"
+        "_Oq fon avtomatik qirqiladi. Sifat yaxshi bo‘lishi uchun rasmni file/document sifatida yuborishingiz ham mumkin._\n\n"
         "Bekor qilish uchun /cancel bosing."
     )
 
@@ -387,12 +392,26 @@ async def add_barcode_received(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def cmd_done_in_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles /done inside conversation: informs user that save is automatic."""
+    user_id = update.effective_user.id
+    session = session_mgr.get_session(user_id)
+    draft = session.current_draft
+
+    if not draft.get("photo_path"):
+        next_state = STATE_WAITING_PHOTO
+        next_step = "hozir mahsulot rasmini yuboring."
+    elif not draft.get("name"):
+        next_state = STATE_WAITING_NAME
+        next_step = "hozir mahsulot nomini yuboring."
+    else:
+        next_state = STATE_WAITING_BARCODE
+        next_step = "hozir barcode yoki mahsulot kodini yuboring."
+
     await update.message.reply_text(
         "ℹ️ `/done` buyrug‘i kerak emas! Barcode kiritilishi bilanoq mahsulot avtomatik saqlanadi.\n"
-        "Iltimos, so‘ralgan ma’lumotni yuboring yoki bekor qilish uchun /cancel bosing.",
+        f"Iltimos, {next_step} Bekor qilish uchun /cancel bosing.",
         parse_mode=ParseMode.MARKDOWN,
     )
-    return ConversationHandler.END
+    return next_state
 
 
 async def cmd_done_global(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -458,12 +477,8 @@ async def _generate_and_send_documents(
         parse_mode=ParseMode.MARKDOWN,
     )
 
-    # Unique filenames: labels_preview_YYYYMMDD_HHMMSS_<shortid>.docx/pdf or product_labels_...
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    short_id = uuid.uuid4().hex[:6]
     prefix = "product_labels" if is_finish else "labels_preview"
-    unique_base = f"{prefix}_{timestamp}_{short_id}"
-    docx_path = session.session_dir / f"{unique_base}.docx"
+    docx_path = session.new_export_docx_path(prefix)
 
     try:
         # Offload file generation to worker thread to avoid blocking bot event loop
@@ -513,7 +528,7 @@ async def _generate_and_send_documents(
     if not pdf_path and pdf_note:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"ℹ️ *PDF ma’lumoti:*\n{pdf_note}\n\n*DOCX faylingiz* tayyor va uni bemalol chop etishingiz mumkin.",
+            text=f"ℹ️ *PDF ma’lumoti:*\n{esc(pdf_note)}\n\n*DOCX faylingiz* tayyor va uni bemalol chop etishingiz mumkin.",
             parse_mode=ParseMode.MARKDOWN,
         )
 
@@ -558,16 +573,22 @@ async def cmd_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def handle_inline_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles inline buttons for preview, finish, list."""
     query = update.callback_query
-    await query.answer()
     user_id = update.effective_user.id
     session = session_mgr.get_session(user_id)
 
     if query.data == "btn_preview":
+        await query.answer()
         await _generate_and_send_documents(update, context, session, is_finish=False)
     elif query.data == "btn_finish":
+        await query.answer()
         await _generate_and_send_documents(update, context, session, is_finish=True)
     elif query.data == "btn_list":
         await cmd_list(update, context)
+
+
+async def cleanup_old_files_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Background retention cleanup for generated files and stale drafts."""
+    await asyncio.to_thread(session_mgr.cleanup_all_expired_files, GENERATED_RETENTION_DAYS)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -598,6 +619,21 @@ async def post_init(application) -> None:
         await application.bot.set_my_commands(commands)
     except Exception as exc:
         logger.warning("Could not set bot commands: %s", exc)
+
+    try:
+        await asyncio.to_thread(session_mgr.cleanup_all_expired_files, GENERATED_RETENTION_DAYS)
+    except Exception as exc:
+        logger.warning("Startup cleanup failed: %s", exc)
+
+    if application.job_queue:
+        application.job_queue.run_repeating(
+            cleanup_old_files_job,
+            interval=CLEANUP_INTERVAL_HOURS * 3600,
+            first=CLEANUP_INTERVAL_HOURS * 3600,
+            name="cleanup_old_generated_files",
+        )
+    else:
+        logger.warning("JobQueue is not available; scheduled cleanup is disabled.")
 
 
 def create_bot_application() -> object:

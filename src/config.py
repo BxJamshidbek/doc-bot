@@ -13,8 +13,25 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 # Base project path
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def _env_int(name: str, default: int) -> int:
+    """Reads an integer environment variable with a safe fallback."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 # Session storage directory
 SESSION_BASE_DIR = Path(os.getenv("SESSION_DIR", str(BASE_DIR / "data" / "sessions"))).resolve()
+
+# Persistent generated DOCX/PDF storage. Files are cleaned by retention policy.
+GENERATED_BASE_DIR = Path(os.getenv("GENERATED_DIR", str(BASE_DIR / "data" / "generated"))).resolve()
+GENERATED_RETENTION_DAYS = _env_int("GENERATED_RETENTION_DAYS", 30)
+CLEANUP_INTERVAL_HOURS = _env_int("CLEANUP_INTERVAL_HOURS", 24)
+
+# Incoming phone photos can be very large; downscale before processing to avoid memory spikes.
+MAX_UPLOAD_IMAGE_SIDE_PX = _env_int("MAX_UPLOAD_IMAGE_SIDE_PX", 2400)
 
 # Page and Label layout dimensions (A4 standard)
 PAGE_WIDTH_MM = 210.0

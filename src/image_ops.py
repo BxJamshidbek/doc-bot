@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Tuple, Optional
 from PIL import Image, ImageChops, ImageOps
 
+from src.config import MAX_UPLOAD_IMAGE_SIDE_PX
+
 
 def trim_white_background(
     im: Image.Image,
@@ -97,6 +99,12 @@ def process_product_image(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with Image.open(input_path) as im:
+        im = ImageOps.exif_transpose(im)
+        if max(im.size) > MAX_UPLOAD_IMAGE_SIDE_PX:
+            im.thumbnail(
+                (MAX_UPLOAD_IMAGE_SIDE_PX, MAX_UPLOAD_IMAGE_SIDE_PX),
+                Image.Resampling.LANCZOS,
+            )
         processed = trim_white_background(im)
         if processed.mode == "RGBA":
             bg = Image.new("RGB", processed.size, (255, 255, 255))
