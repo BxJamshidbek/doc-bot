@@ -57,6 +57,8 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Conversation states
 STATE_WAITING_PHOTO, STATE_WAITING_NAME, STATE_WAITING_BARCODE = range(3)
