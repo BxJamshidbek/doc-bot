@@ -732,10 +732,9 @@ def main() -> None:
 
         public_url = build_webhook_public_url(WEBHOOK_BASE_URL, webhook_path)
         logger.info(
-            "Starting Telegram Product Label Bot webhook on %s:%s%s",
+            "Starting Telegram Product Label Bot webhook on %s:%s with configured webhook path",
             WEBHOOK_LISTEN_HOST,
             WEBHOOK_LISTEN_PORT,
-            webhook_path,
         )
         application.run_webhook(
             listen=WEBHOOK_LISTEN_HOST,
