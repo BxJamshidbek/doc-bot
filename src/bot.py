@@ -46,6 +46,10 @@ from src.config import (
     WEBHOOK_LISTEN_HOST,
     WEBHOOK_LISTEN_PORT,
     WEBHOOK_SECRET_TOKEN,
+    LABELS_PER_PAGE,
+    TELEGRAM_SAFE_DOCUMENT_SIZE_BYTES,
+    TELEGRAM_SAFE_DOCUMENT_SIZE_MB,
+    MAX_PRODUCTS_PER_DOCX_PART,
 )
 from src.session import ExportRecord, SessionManager, UserSession, normalize_document_name
 from src.docx_gen import create_label_sheet
@@ -60,6 +64,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+class TelegramDocumentTooLargeError(Exception):
+    """Raised before/when Telegram rejects a document upload because it is too large."""
+
+    def __init__(self, path: Path, size_bytes: int, original_error: Exception | None = None):
+        self.path = Path(path)
+        self.size_bytes = int(size_bytes)
+        self.original_error = original_error
+        super().__init__(f"{self.path.name} is too large for Telegram ({format_file_size(self.size_bytes)})")
 
 # Conversation states
 (
@@ -123,6 +137,49 @@ MAIN_INLINE_KEYBOARD = InlineKeyboardMarkup(
 def esc(text: object) -> str:
     """Safely escapes user text for Telegram Markdown V1."""
     return escape_markdown(str(text), version=1)
+
+
+def format_file_size(size_bytes: int) -> str:
+    """Formats a byte count for Telegram-facing status messages."""
+    size = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size_bytes} B"
+
+
+def is_request_entity_too_large(exc: Exception) -> bool:
+    """Detects Telegram/httpx 413 errors without depending on one exception class."""
+    text = str(exc).lower()
+    return "request entity too large" in text or "413" in text
+
+
+def safe_docx_part_size(total_products: int) -> int:
+    """Returns the first chunk size to try when a generated DOCX is too large."""
+    if total_products <= 0:
+        return 1
+    configured = min(max(1, MAX_PRODUCTS_PER_DOCX_PART), total_products)
+    if configured >= LABELS_PER_PAGE:
+        configured = max(LABELS_PER_PAGE, (configured // LABELS_PER_PAGE) * LABELS_PER_PAGE)
+    return max(1, configured)
+
+
+def chunk_products_for_document_parts(products: list, max_products_per_part: int) -> list[list]:
+    """Splits products into ordered chunks for multi-part DOCX delivery."""
+    chunk_size = max(1, int(max_products_per_part))
+    return [list(products[index:index + chunk_size]) for index in range(0, len(products), chunk_size)]
+
+
+def next_smaller_docx_part_size(current_size: int) -> int:
+    """Reduces a DOCX split size while preserving full pages when practical."""
+    current_size = max(1, int(current_size))
+    if current_size > LABELS_PER_PAGE:
+        half = current_size // 2
+        return max(LABELS_PER_PAGE, (half // LABELS_PER_PAGE) * LABELS_PER_PAGE)
+    if current_size > 1:
+        return max(1, current_size // 2)
+    return 1
 
 
 def safe_image_extension(file_name: Optional[str], mime_type: Optional[str]) -> str:
@@ -964,6 +1021,134 @@ def build_exports_keyboard(records: list[ExportRecord]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+async def send_document_file_with_limit(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    path: Path,
+    filename: str,
+    caption: str,
+) -> None:
+    """Sends one document only when it is safely below Telegram's request limit."""
+    file_size = path.stat().st_size
+    if file_size > TELEGRAM_SAFE_DOCUMENT_SIZE_BYTES:
+        raise TelegramDocumentTooLargeError(path, file_size)
+
+    try:
+        with open(path, "rb") as f_doc:
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=f_doc,
+                filename=filename,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+    except Exception as exc:
+        if is_request_entity_too_large(exc):
+            raise TelegramDocumentTooLargeError(path, file_size, original_error=exc) from exc
+        raise
+
+
+def split_docx_path(base_docx_path: Path, part_index: int, part_count: int) -> Path:
+    """Builds a stable split DOCX filename next to the original export."""
+    return base_docx_path.with_name(
+        f"{base_docx_path.stem}_part{part_index:02d}of{part_count:02d}{base_docx_path.suffix}"
+    )
+
+
+def remove_stale_split_files(base_docx_path: Path) -> None:
+    """Removes split files from previous retries for the same generated export name."""
+    for stale in base_docx_path.parent.glob(f"{base_docx_path.stem}_part*"):
+        if stale.is_file() and UserSession._is_within(stale, base_docx_path.parent):
+            stale.unlink(missing_ok=True)
+
+
+async def create_split_export_records(
+    *,
+    session: UserSession,
+    base_docx_path: Path,
+    products: list,
+    kind: str,
+) -> list[ExportRecord]:
+    """
+    Creates ordered split DOCX/PDF export records. It retries with smaller
+    chunks if any generated part still exceeds the Telegram-safe size.
+    """
+    part_size = safe_docx_part_size(len(products))
+    remove_stale_split_files(base_docx_path)
+
+    while True:
+        chunks = chunk_products_for_document_parts(products, part_size)
+        generated_parts = []
+        too_large = False
+
+        for idx, chunk in enumerate(chunks, start=1):
+            part_docx = split_docx_path(base_docx_path, idx, len(chunks))
+            await asyncio.to_thread(create_label_sheet, chunk, part_docx)
+            if part_docx.stat().st_size > TELEGRAM_SAFE_DOCUMENT_SIZE_BYTES:
+                too_large = True
+                part_docx.unlink(missing_ok=True)
+                break
+
+            part_pdf, _part_pdf_note = await asyncio.to_thread(convert_docx_to_pdf, part_docx)
+            if part_pdf and part_pdf.is_file() and part_pdf.stat().st_size > TELEGRAM_SAFE_DOCUMENT_SIZE_BYTES:
+                part_pdf.unlink(missing_ok=True)
+                part_pdf = None
+
+            generated_parts.append(
+                {
+                    "index": idx,
+                    "count": len(chunks),
+                    "chunk": chunk,
+                    "docx": part_docx,
+                    "pdf": part_pdf if part_pdf and part_pdf.is_file() else None,
+                }
+            )
+
+        if not too_large:
+            records_by_index = {}
+            # Insert records from the last part to the first so /files lists
+            # part 1 before part 2.
+            for part in reversed(generated_parts):
+                title = f"{session.get_document_title()} qism {part['index']}/{part['count']}"
+                records_by_index[part["index"]] = session.record_export(
+                    kind=kind,
+                    docx_path=part["docx"],
+                    pdf_path=part["pdf"],
+                    product_count=len(part["chunk"]),
+                    page_count=(len(part["chunk"]) + LABELS_PER_PAGE - 1) // LABELS_PER_PAGE,
+                    title=title,
+                )
+            return [records_by_index[index] for index in range(1, len(generated_parts) + 1)]
+
+        for part in generated_parts:
+            Path(part["docx"]).unlink(missing_ok=True)
+            if part["pdf"]:
+                Path(part["pdf"]).unlink(missing_ok=True)
+
+        next_part_size = next_smaller_docx_part_size(part_size)
+        if next_part_size == part_size:
+            raise TelegramDocumentTooLargeError(part_docx, part_docx.stat().st_size)
+        part_size = next_part_size
+
+
+async def send_export_record_docx(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    record: ExportRecord,
+    caption: str,
+) -> None:
+    """Sends the DOCX file for one export record with a size guard."""
+    await send_document_file_with_limit(
+        context=context,
+        chat_id=chat_id,
+        path=Path(record.docx_path),
+        filename=Path(record.docx_path).name,
+        caption=caption,
+    )
+
+
 async def send_export_record_documents(
     *,
     context: ContextTypes.DEFAULT_TYPE,
@@ -979,34 +1164,53 @@ async def send_export_record_documents(
 
     docx_path = Path(record.docx_path)
     if docx_path.is_file() and any(UserSession._is_within(docx_path, base_dir) for base_dir in allowed_export_dirs):
-        with open(docx_path, "rb") as f_docx:
-            await context.bot.send_document(
+        try:
+            await send_export_record_docx(
+                context=context,
                 chat_id=chat_id,
-                document=f_docx,
-                filename=docx_path.name,
+                record=record,
                 caption=(
                     f"📄 *{kind_label} DOCX:* {title}\n"
-                    f"• {esc(format_export_details(record))}"
+                    f"• {esc(format_export_details(record))}\n"
+                    f"• Hajmi: {esc(format_file_size(docx_path.stat().st_size))}"
                 ),
+            )
+            sent_any = True
+        except TelegramDocumentTooLargeError as exc:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"⚠️ Bu DOCX Telegram uchun juda katta: {esc(format_file_size(exc.size_bytes))}.\n"
+                    f"Limitdan xavfsiz past yuborish chegarasi: {TELEGRAM_SAFE_DOCUMENT_SIZE_MB} MB.\n\n"
+                    "Yangi /preview yoki /finish bosing — yangi versiyada rasmlar ixchamlanadi "
+                    "va kerak bo‘lsa hujjat avtomatik qismlarga bo‘linadi."
+                ),
+                reply_markup=HIDE_REPLY_KEYBOARD,
                 parse_mode=ParseMode.MARKDOWN,
             )
-        sent_any = True
 
     if record.pdf_path:
         pdf_path = Path(record.pdf_path)
         if pdf_path.is_file() and any(UserSession._is_within(pdf_path, base_dir) for base_dir in allowed_export_dirs):
-            with open(pdf_path, "rb") as f_pdf:
-                await context.bot.send_document(
+            try:
+                await send_document_file_with_limit(
+                    context=context,
                     chat_id=chat_id,
-                    document=f_pdf,
+                    path=pdf_path,
                     filename=pdf_path.name,
                     caption=(
                         f"📑 *{kind_label} PDF:* {title}\n"
                         "• Chop etishga tayyor A4 format."
                     ),
+                )
+                sent_any = True
+            except TelegramDocumentTooLargeError as exc:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ Bu PDF Telegram uchun juda katta: {esc(format_file_size(exc.size_bytes))}.",
+                    reply_markup=HIDE_REPLY_KEYBOARD,
                     parse_mode=ParseMode.MARKDOWN,
                 )
-            sent_any = True
 
     if not sent_any:
         await context.bot.send_message(
@@ -1051,66 +1255,125 @@ async def _generate_and_send_documents(
         await status_msg.edit_text(f"❌ DOCX yaratishda xatolik yuz berdi: {esc(exc)}")
         return
 
-    # Offload PDF conversion to worker thread
-    pdf_path, pdf_note = await asyncio.to_thread(convert_docx_to_pdf, docx_path)
-    page_count = (len(session.products) + 11) // 12
-    export_record = session.record_export(
-        kind="final" if is_finish else "preview",
-        docx_path=docx_path,
-        pdf_path=pdf_path if pdf_path and pdf_path.is_file() else None,
-        product_count=len(session.products),
-        page_count=page_count,
-    )
+    page_count = (len(session.products) + LABELS_PER_PAGE - 1) // LABELS_PER_PAGE
+    export_kind = "final" if is_finish else "preview"
+    export_records: list[ExportRecord] = []
+    split_mode = False
+    pdf_note = None
 
-    # Send DOCX file
-    try:
-        with open(docx_path, "rb") as f_docx:
-            await context.bot.send_document(
-                chat_id=chat_id,
-                document=f_docx,
-                filename=docx_path.name,
-                caption=(
-                    f"📄 *{export_kind_label(export_record.kind)} DOCX:* {esc(export_record.title)}\n"
-                    f"• {len(session.products)} ta mahsulot | {page_count} bet\n"
-                    f"• A4 format, 12 ta yorliq (3 ustun × 4 qator)"
+    if docx_path.stat().st_size > TELEGRAM_SAFE_DOCUMENT_SIZE_BYTES:
+        split_mode = True
+        await status_msg.edit_text(
+            (
+                f"⚠️ DOCX hajmi katta: {esc(format_file_size(docx_path.stat().st_size))}.\n"
+                "Telegram limitidan oshmasligi uchun hujjat qismlarga bo‘linmoqda..."
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        try:
+            export_records = await create_split_export_records(
+                session=session,
+                base_docx_path=docx_path,
+                products=list(session.products),
+                kind=export_kind,
+            )
+            docx_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.exception("Error creating split DOCX files: %s", exc)
+            await status_msg.edit_text(
+                (
+                    f"❌ DOCX juda katta va qismlarga bo‘lishda xatolik yuz berdi: {esc(exc)}\n\n"
+                    "Iltimos, rasmlarni biroz yengilroq qilib yuboring yoki mahsulotlarni kamroq qism bilan final qiling."
                 ),
                 parse_mode=ParseMode.MARKDOWN,
             )
-    except Exception as exc:
-        logger.exception("Error sending DOCX file: %s", exc)
-        await status_msg.edit_text(f"❌ DOCX yuborishda xatolik: {esc(exc)}")
-        return
+            return
+    else:
+        # Offload PDF conversion to worker thread for the normal one-file export.
+        pdf_path, pdf_note = await asyncio.to_thread(convert_docx_to_pdf, docx_path)
+        safe_pdf_path = None
+        if pdf_path and pdf_path.is_file() and pdf_path.stat().st_size <= TELEGRAM_SAFE_DOCUMENT_SIZE_BYTES:
+            safe_pdf_path = pdf_path
+        export_records = [
+            session.record_export(
+                kind=export_kind,
+                docx_path=docx_path,
+                pdf_path=safe_pdf_path,
+                product_count=len(session.products),
+                page_count=page_count,
+            )
+        ]
 
-    # Send PDF file if generated
-    if pdf_path and pdf_path.is_file():
+    # Send generated DOCX/PDF file(s)
+    for record_index, export_record in enumerate(export_records, start=1):
+        docx_file = Path(export_record.docx_path)
+        part_suffix = f" | qism {record_index}/{len(export_records)}" if split_mode else ""
         try:
-            with open(pdf_path, "rb") as f_pdf:
-                await context.bot.send_document(
+            await send_export_record_docx(
+                context=context,
+                chat_id=chat_id,
+                record=export_record,
+                caption=(
+                    f"📄 *{export_kind_label(export_record.kind)} DOCX:* {esc(export_record.title)}\n"
+                    f"• {export_record.product_count} ta mahsulot | {export_record.page_count} bet{esc(part_suffix)}\n"
+                    f"• Hajmi: {esc(format_file_size(docx_file.stat().st_size))}\n"
+                    f"• A4 format, 12 ta yorliq (3 ustun × 4 qator)"
+                ),
+            )
+        except TelegramDocumentTooLargeError as exc:
+            logger.exception("DOCX still too large after size guard: %s", exc)
+            await status_msg.edit_text(
+                (
+                    f"❌ DOCX hali ham Telegram uchun katta: {esc(format_file_size(exc.size_bytes))}.\n"
+                    "Bot faylni serverda saqladi, lekin Telegram orqali yuborib bo‘lmadi."
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        except Exception as exc:
+            logger.exception("Error sending DOCX file: %s", exc)
+            await status_msg.edit_text(f"❌ DOCX yuborishda xatolik: {esc(exc)}")
+            return
+
+        if export_record.pdf_path:
+            pdf_file = Path(export_record.pdf_path)
+            try:
+                await send_document_file_with_limit(
+                    context=context,
                     chat_id=chat_id,
-                    document=f_pdf,
-                    filename=pdf_path.name,
+                    path=pdf_file,
+                    filename=pdf_file.name,
                     caption=(
                         f"📑 *{export_kind_label(export_record.kind)} PDF:* {esc(export_record.title)}\n"
                         "• A4 formatda to‘g‘ridan-to‘g‘ri chop etish uchun."
                     ),
+                )
+            except TelegramDocumentTooLargeError as exc:
+                logger.warning("PDF too large to send: %s", exc)
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ PDF juda katta bo‘lgani uchun yuborilmadi: {esc(format_file_size(exc.size_bytes))}.",
                     parse_mode=ParseMode.MARKDOWN,
                 )
-        except Exception as exc:
-            logger.warning("Error sending PDF file: %s", exc)
+            except Exception as exc:
+                logger.warning("Error sending PDF file: %s", exc)
 
     # If PDF wasn't generated and a note is available
-    if not pdf_path and pdf_note:
+    if not split_mode and pdf_note:
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"ℹ️ *PDF ma’lumoti:*\n{esc(pdf_note)}\n\n*DOCX faylingiz* tayyor va uni bemalol chop etishingiz mumkin.",
             parse_mode=ParseMode.MARKDOWN,
         )
 
+    result_title = export_records[0].title if export_records else session.get_document_title()
+    split_notice = f"\nDOCX {len(export_records)} qismga bo‘lib yuborildi." if split_mode else ""
+
     # Post-generation messages adhering to requirements
     if is_finish:
         finish_text = (
-            f"🎉 *Hujjat tayyor:* {esc(export_record.title)}\n"
-            f"Jami: *{len(session.products)}* ta mahsulot, *{page_count}* bet.\n\n"
+            f"🎉 *Hujjat tayyor:* {esc(result_title)}\n"
+            f"Jami: *{len(session.products)}* ta mahsulot, *{page_count}* bet.{esc(split_notice)}\n\n"
             "Agar yangi varaq boshlamoqchi bo‘lsangiz /new bosing.\n"
             "Agar shu ro‘yxatga yana mahsulot qo‘shmoqchi bo‘lsangiz /add bosing.\n"
             "Oldingi fayllar uchun /files bosing."
@@ -1122,8 +1385,8 @@ async def _generate_and_send_documents(
         )
     else:
         preview_text = (
-            f"👀 *Preview tayyor:* {esc(export_record.title)}\n"
-            f"Hozirgi holat: *{len(session.products)}* ta mahsulot.\n\n"
+            f"👀 *Preview tayyor:* {esc(result_title)}\n"
+            f"Hozirgi holat: *{len(session.products)}* ta mahsulot.{esc(split_notice)}\n\n"
             "Ro‘yxat saqlanib qoldi. Yana mahsulot qo‘shish uchun /add bosing yoki yakuniy fayllarni olish uchun /finish bosing.\n"
             "Oldingi fayllar uchun /files bosing."
         )

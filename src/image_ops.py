@@ -88,7 +88,12 @@ def trim_white_background(
 
 def process_product_image(
     input_path: str | Path,
-    output_path: str | Path
+    output_path: str | Path,
+    *,
+    max_side_px: Optional[int] = None,
+    target_max_size_px: Optional[Tuple[int, int]] = None,
+    output_format: str = "PNG",
+    jpeg_quality: int = 82,
 ) -> Tuple[int, int]:
     """
     Loads, processes (EXIF transpose + white background trim),
@@ -100,9 +105,10 @@ def process_product_image(
 
     with Image.open(input_path) as im:
         im = ImageOps.exif_transpose(im)
-        if max(im.size) > MAX_UPLOAD_IMAGE_SIDE_PX:
+        initial_max_side_px = max_side_px or MAX_UPLOAD_IMAGE_SIDE_PX
+        if max(im.size) > initial_max_side_px:
             im.thumbnail(
-                (MAX_UPLOAD_IMAGE_SIDE_PX, MAX_UPLOAD_IMAGE_SIDE_PX),
+                (initial_max_side_px, initial_max_side_px),
                 Image.Resampling.LANCZOS,
             )
         processed = trim_white_background(im)
@@ -113,7 +119,26 @@ def process_product_image(
         elif processed.mode != "RGB":
             processed = processed.convert("RGB")
 
-        processed.save(output_path, format="PNG", optimize=True)
+        if target_max_size_px:
+            target_w, target_h = target_max_size_px
+            target_w = max(1, int(target_w))
+            target_h = max(1, int(target_h))
+            if processed.width > target_w or processed.height > target_h:
+                processed.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+
+        normalized_format = (output_format or "PNG").strip().upper()
+        if normalized_format in {"JPG", "JPEG"}:
+            if processed.mode != "RGB":
+                processed = processed.convert("RGB")
+            processed.save(
+                output_path,
+                format="JPEG",
+                quality=max(60, min(95, int(jpeg_quality))),
+                optimize=True,
+                progressive=True,
+            )
+        else:
+            processed.save(output_path, format="PNG", optimize=True)
         return processed.size
 
 

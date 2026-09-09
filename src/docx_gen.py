@@ -34,6 +34,8 @@ from src.config import (
     MAX_PHOTO_HEIGHT_MM,
     MAX_BARCODE_WIDTH_MM,
     MAX_BARCODE_HEIGHT_MM,
+    MAX_EMBEDDED_PHOTO_DPI,
+    PHOTO_JPEG_QUALITY,
     FONT_NAME,
     FONT_SIZE_NAME_PT,
     FONT_SIZE_CODE_PT,
@@ -46,6 +48,11 @@ from src.session import ProductItem
 
 EMPTY_CELL_SPACER_WIDTH_MM = 62.0
 EMPTY_CELL_SPACER_HEIGHT_MM = 0.2
+
+
+def _mm_to_px(mm_value: float, dpi: int) -> int:
+    """Converts a physical DOCX image box size into print-resolution pixels."""
+    return max(1, int(math.ceil((mm_value / 25.4) * dpi)))
 
 
 def _remove_child_elements(parent, tag_name: str) -> None:
@@ -206,22 +213,32 @@ def _populate_label_cell(
 
     photo_path = Path(product.image_path)
     # Safe temp filename using uuid4 to support any original filename
-    processed_photo = temp_dir / f"proc_{uuid.uuid4().hex}.png"
+    processed_photo = temp_dir / f"proc_{uuid.uuid4().hex}.jpg"
+    photo_target_size_px = (
+        _mm_to_px(MAX_PHOTO_WIDTH_MM, MAX_EMBEDDED_PHOTO_DPI),
+        _mm_to_px(MAX_PHOTO_HEIGHT_MM, MAX_EMBEDDED_PHOTO_DPI),
+    )
 
     try:
         if photo_path.is_file():
-            img_w, img_h = process_product_image(photo_path, processed_photo)
+            img_w, img_h = process_product_image(
+                photo_path,
+                processed_photo,
+                target_max_size_px=photo_target_size_px,
+                output_format="JPEG",
+                jpeg_quality=PHOTO_JPEG_QUALITY,
+            )
         else:
             placeholder = Image.new("RGB", (200, 200), (245, 245, 245))
             d = ImageDraw.Draw(placeholder)
             d.text((50, 90), "No Image", fill=(120, 120, 120))
-            placeholder.save(processed_photo)
+            placeholder.save(processed_photo, format="JPEG", quality=PHOTO_JPEG_QUALITY, optimize=True)
             img_w, img_h = 200, 200
     except Exception:
         placeholder = Image.new("RGB", (200, 200), (245, 245, 245))
         d = ImageDraw.Draw(placeholder)
         d.text((50, 90), "No Image", fill=(120, 120, 120))
-        placeholder.save(processed_photo)
+        placeholder.save(processed_photo, format="JPEG", quality=PHOTO_JPEG_QUALITY, optimize=True)
         img_w, img_h = 200, 200
 
     fit_w, fit_h = calculate_fit_dimensions(

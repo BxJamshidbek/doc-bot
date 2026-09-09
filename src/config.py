@@ -33,6 +33,17 @@ CLEANUP_INTERVAL_HOURS = _env_int("CLEANUP_INTERVAL_HOURS", 24)
 # Incoming phone photos can be very large; downscale before processing to avoid memory spikes.
 MAX_UPLOAD_IMAGE_SIDE_PX = _env_int("MAX_UPLOAD_IMAGE_SIDE_PX", 2400)
 
+# Photos inside each DOCX label are physically small on paper. Embedding full
+# phone-resolution PNGs makes 100+ product documents too large for Telegram.
+MAX_EMBEDDED_PHOTO_DPI = _env_int("MAX_EMBEDDED_PHOTO_DPI", 300)
+PHOTO_JPEG_QUALITY = max(60, min(95, _env_int("PHOTO_JPEG_QUALITY", 82)))
+
+# Keep uploads below Telegram's hard request limit so the bot can fall back to
+# split documents before Telegram returns "Request Entity Too Large".
+TELEGRAM_SAFE_DOCUMENT_SIZE_MB = _env_int("TELEGRAM_SAFE_DOCUMENT_SIZE_MB", 45)
+TELEGRAM_SAFE_DOCUMENT_SIZE_BYTES = max(1, TELEGRAM_SAFE_DOCUMENT_SIZE_MB) * 1024 * 1024
+MAX_PRODUCTS_PER_DOCX_PART = max(1, _env_int("MAX_PRODUCTS_PER_DOCX_PART", 72))
+
 # Runtime mode. Use "polling" for simple deployment or "webhook" behind HTTPS/Nginx.
 BOT_RUN_MODE = os.getenv("BOT_RUN_MODE", "polling").strip().lower()
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip().rstrip("/")

@@ -56,6 +56,30 @@ class TestImageOps(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_docx_embedded_photo_is_compact_jpeg(self):
+        temp_dir = Path(tempfile.mkdtemp())
+        try:
+            src = temp_dir / "large_phone_photo.jpg"
+            out = temp_dir / "processed.jpg"
+            img = Image.new("RGB", (3200, 2200), (80, 90, 100))
+            img.save(src)
+
+            width, height = process_product_image(
+                src,
+                out,
+                target_max_size_px=(662, 426),
+                output_format="JPEG",
+                jpeg_quality=82,
+            )
+
+            self.assertTrue(out.is_file())
+            self.assertLessEqual(width, 662)
+            self.assertLessEqual(height, 426)
+            with Image.open(out) as rendered:
+                self.assertEqual(rendered.format, "JPEG")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_phone_exif_orientation_is_normalized(self):
         temp_dir = Path(tempfile.mkdtemp())
         try:
@@ -530,6 +554,17 @@ class TestBotEscaping(unittest.TestCase):
 
         self.assertTrue(MAIN_REPLY_KEYBOARD.one_time_keyboard)
         self.assertFalse(MAIN_REPLY_KEYBOARD.is_persistent)
+
+    def test_large_document_chunks_preserve_order(self):
+        from src.bot import chunk_products_for_document_parts, next_smaller_docx_part_size, safe_docx_part_size
+
+        products = list(range(25))
+        chunks = chunk_products_for_document_parts(products, 12)
+
+        self.assertEqual(chunks, [list(range(12)), list(range(12, 24)), [24]])
+        self.assertEqual(safe_docx_part_size(100), 72)
+        self.assertEqual(next_smaller_docx_part_size(72), 36)
+        self.assertEqual(next_smaller_docx_part_size(12), 6)
 
 
 if __name__ == "__main__":

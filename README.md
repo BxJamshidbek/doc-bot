@@ -20,6 +20,8 @@ A Python Telegram bot that generates professional, cashier-ready printable A4 pr
   - Proportional scaling ensures product images are never stretched or distorted.
 - **Dual Export (DOCX & PDF)**:
   - Generates DOCX files with light gray cutting guide borders (`#C8C8C8` outer, `#E0E0E0` inner).
+  - Embeds product photos as print-quality compact JPEGs so 100+ product sheets stay small enough for Telegram.
+  - If an export is still too large, automatically splits the DOCX into ordered parts instead of failing with `Request Entity Too Large`.
   - Converts to PDF automatically if LibreOffice is installed; if not, sends the DOCX and provides a clear installation tip.
   - Preview and final exports use unique filenames so files are not overwritten.
 - **Named Documents & Previous Files**:
@@ -120,6 +122,10 @@ Each label cell contains:
    GENERATED_RETENTION_DAYS=30
    CLEANUP_INTERVAL_HOURS=24
    MAX_UPLOAD_IMAGE_SIDE_PX=2400
+   MAX_EMBEDDED_PHOTO_DPI=300
+   PHOTO_JPEG_QUALITY=82
+   TELEGRAM_SAFE_DOCUMENT_SIZE_MB=45
+   MAX_PRODUCTS_PER_DOCX_PART=72
    ```
 
    On a server, keep `SESSION_DIR` and `GENERATED_DIR` on persistent disk, not in a temporary directory.

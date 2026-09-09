@@ -349,11 +349,12 @@ class UserSession:
         pdf_path: Optional[str | Path],
         product_count: int,
         page_count: int,
+        title: Optional[str] = None,
     ) -> ExportRecord:
         """Stores metadata for a generated preview/final document."""
         record = ExportRecord(
             export_id=uuid.uuid4().hex[:12],
-            title=self.get_document_title(),
+            title=normalize_document_name(title) or self.get_document_title(),
             kind="final" if kind == "final" else "preview",
             docx_path=str(Path(docx_path).resolve()),
             pdf_path=str(Path(pdf_path).resolve()) if pdf_path else None,
