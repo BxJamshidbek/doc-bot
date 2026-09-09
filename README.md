@@ -225,7 +225,7 @@ Recommended Ubuntu package setup:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip libreoffice git nginx certbot python3-certbot-nginx
+sudo apt-get install -y python3 python3-venv python3-pip libreoffice poppler-utils git nginx certbot python3-certbot-nginx
 cd /root
 git clone https://github.com/BxJamshidbek/doc-bot.git "doc bot"
 cd "doc bot"

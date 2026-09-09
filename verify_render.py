@@ -72,22 +72,45 @@ def verify_pdf_page_count(pdf_path: Path, expected_pages: int):
     print(f"  ✓ PDF Page count verified: {pdf_path.name} has exactly {actual_pages} page(s) (matches expected {expected_pages}).")
 
 
-def run_visual_thumbnail_check(docx_path: Path, out_dir: Path):
-    """Uses macOS QuickLook (qlmanage) to render the DOCX to PNG and checks image visibility."""
-    res = subprocess.run(
-        ["qlmanage", "-t", "-s", "1200", "-o", str(out_dir), str(docx_path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    thumb_path = out_dir / f"{docx_path.name}.png"
-    if thumb_path.is_file():
-        im = Image.open(thumb_path)
-        extrema = im.convert("L").getextrema()
-        assert extrema[0] < 50, f"Thumbnail appears empty or all-white! Min pixel value: {extrema[0]}"
-        print(f"  ✓ QuickLook visual thumbnail: {thumb_path.name} ({im.size[0]}x{im.size[1]} px, dark pixels confirmed).")
-        return thumb_path
-    return None
+def _assert_thumbnail_has_content(thumb_path: Path, label: str) -> Path:
+    """Checks that a rendered page thumbnail is not blank."""
+    im = Image.open(thumb_path)
+    extrema = im.convert("L").getextrema()
+    assert extrema[0] < 50, f"Thumbnail appears empty or all-white! Min pixel value: {extrema[0]}"
+    print(f"  ✓ {label}: {thumb_path.name} ({im.size[0]}x{im.size[1]} px, dark pixels confirmed).")
+    return thumb_path
+
+
+def run_visual_thumbnail_check(docx_path: Path, out_dir: Path, pdf_path: Path):
+    """Renders page 1 to PNG on macOS or Linux and checks image visibility."""
+    qlmanage = shutil.which("qlmanage")
+    if qlmanage:
+        subprocess.run(
+            [qlmanage, "-t", "-s", "1200", "-o", str(out_dir), str(docx_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        thumb_path = out_dir / f"{docx_path.name}.png"
+        if thumb_path.is_file():
+            return _assert_thumbnail_has_content(thumb_path, "QuickLook visual thumbnail")
+
+    pdftoppm = shutil.which("pdftoppm")
+    if pdftoppm:
+        out_prefix = out_dir / f"{pdf_path.stem}_page1"
+        subprocess.run(
+            [pdftoppm, "-png", "-singlefile", "-f", "1", "-r", "144", str(pdf_path), str(out_prefix)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        thumb_path = out_prefix.with_suffix(".png")
+        if thumb_path.is_file():
+            return _assert_thumbnail_has_content(thumb_path, "Poppler visual thumbnail")
+
+    raise RuntimeError("No visual renderer found. Install poppler-utils on Linux or use macOS QuickLook.")
 
 
 def main():
@@ -148,8 +171,8 @@ def main():
         else:
             raise RuntimeError(f"Failed to generate PDF for {docx_name}: {pdf_note}")
 
-        # 5. Visual QuickLook check
-        run_visual_thumbnail_check(docx_path, test_dir)
+        # 5. Visual page-render check
+        run_visual_thumbnail_check(docx_path, test_dir, pdf_path)
 
     print("\n" + "=" * 60)
     print("✅ All DOCX and PDF render verifications passed successfully!")
