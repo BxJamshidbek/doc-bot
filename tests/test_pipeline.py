@@ -175,6 +175,33 @@ class TestSessionManager(unittest.TestCase):
         self.assertEqual(session.products[0].name, "First")
         self.assertEqual(session.products[1].name, "Third")
 
+    def test_update_product_fields(self):
+        session = self.mgr.get_session(12345)
+        old_img = session.session_dir / "old.png"
+        new_img = session.session_dir / "new.png"
+        old_img.write_text("old", encoding="utf-8")
+        new_img.write_text("new", encoding="utf-8")
+        session.add_product("Old name", "111", str(old_img))
+
+        self.assertIsNotNone(session.update_product_name(1, "New name"))
+        self.assertIsNotNone(session.update_product_barcode(1, "222"))
+        self.assertIsNotNone(session.update_product_image(1, str(new_img)))
+
+        updated = session.get_product(1)
+        self.assertEqual(updated.name, "New name")
+        self.assertEqual(updated.barcode, "222")
+        self.assertEqual(updated.image_path, str(new_img))
+        self.assertFalse(old_img.exists())
+        self.assertTrue(new_img.exists())
+
+    def test_update_product_rejects_invalid_index(self):
+        session = self.mgr.get_session(12345)
+
+        self.assertIsNone(session.get_product(1))
+        self.assertIsNone(session.update_product_name(1, "Name"))
+        self.assertIsNone(session.update_product_barcode(1, "123"))
+        self.assertIsNone(session.update_product_image(1, "/fake/new.png"))
+
     def test_clear_preserves_documents(self):
         session = self.mgr.get_session(12345)
         # Create a dummy export document
@@ -457,6 +484,52 @@ class TestBotEscaping(unittest.TestCase):
             build_webhook_public_url("https://labels.example.com/", "tg/secret"),
             "https://labels.example.com/tg/secret",
         )
+
+    def test_product_list_has_edit_buttons(self):
+        from src.bot import build_product_edit_keyboard, build_products_keyboard, format_products_list
+
+        temp_dir = Path(tempfile.mkdtemp())
+        try:
+            mgr = SessionManager(temp_dir / "sessions", temp_dir / "generated")
+            session = mgr.get_session(12345)
+            img_file = session.session_dir / "item.png"
+            img_file.write_text("img", encoding="utf-8")
+            session.set_document_name("Test")
+            session.add_product("Scanner", "1000023", str(img_file))
+            session.add_product("Perexod 76-50mm", "1000049", str(img_file))
+
+            list_text = format_products_list(session)
+            self.assertIn("/edit 2", list_text)
+            self.assertIn("Perexod", list_text)
+
+            keyboard = build_products_keyboard(session)
+            callback_data = [
+                button.callback_data
+                for row in keyboard.inline_keyboard
+                for button in row
+            ]
+            self.assertIn("edit:1", callback_data)
+            self.assertIn("edit:2", callback_data)
+            self.assertIn("btn_add", callback_data)
+
+            edit_keyboard = build_product_edit_keyboard(2)
+            edit_callbacks = [
+                button.callback_data
+                for row in edit_keyboard.inline_keyboard
+                for button in row
+            ]
+            self.assertEqual(
+                edit_callbacks,
+                ["edit_photo:2", "edit_name:2", "edit_barcode:2", "remove:2", "btn_list"],
+            )
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_reply_keyboard_is_optional_not_persistent(self):
+        from src.bot import MAIN_REPLY_KEYBOARD
+
+        self.assertTrue(MAIN_REPLY_KEYBOARD.one_time_keyboard)
+        self.assertFalse(MAIN_REPLY_KEYBOARD.is_persistent)
 
 
 if __name__ == "__main__":

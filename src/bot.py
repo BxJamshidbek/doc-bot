@@ -14,6 +14,7 @@ from telegram import (
     Update,
     BotCommand,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
@@ -61,7 +62,15 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Conversation states
-STATE_WAITING_DOCUMENT_NAME, STATE_WAITING_PHOTO, STATE_WAITING_NAME, STATE_WAITING_BARCODE = range(4)
+(
+    STATE_WAITING_DOCUMENT_NAME,
+    STATE_WAITING_PHOTO,
+    STATE_WAITING_NAME,
+    STATE_WAITING_BARCODE,
+    STATE_WAITING_EDIT_PHOTO,
+    STATE_WAITING_EDIT_NAME,
+    STATE_WAITING_EDIT_BARCODE,
+) = range(7)
 
 # Global session manager
 session_mgr = SessionManager(SESSION_BASE_DIR, GENERATED_BASE_DIR)
@@ -84,7 +93,11 @@ MAIN_REPLY_KEYBOARD = ReplyKeyboardMarkup(
         ["🆕 Yangi hujjat", "🗂 Oldingi fayllar"],
     ],
     resize_keyboard=True,
+    one_time_keyboard=True,
+    is_persistent=False,
+    input_field_placeholder="Kerakli amalni tanlang",
 )
+HIDE_REPLY_KEYBOARD = ReplyKeyboardRemove()
 
 MAIN_INLINE_KEYBOARD = InlineKeyboardMarkup(
     [
@@ -99,6 +112,9 @@ MAIN_INLINE_KEYBOARD = InlineKeyboardMarkup(
         [
             InlineKeyboardButton("🆕 Yangi hujjat", callback_data="btn_new"),
             InlineKeyboardButton("🗂 Oldingi fayllar", callback_data="btn_files"),
+        ],
+        [
+            InlineKeyboardButton("☰ Pastki menyuni ochish", callback_data="btn_menu"),
         ],
     ]
 )
@@ -130,8 +146,119 @@ def build_webhook_public_url(base_url: str, path: str) -> str:
     return f"{base_url.strip().rstrip('/')}{normalize_webhook_path(path)}"
 
 
+def parse_index_from_callback(data: str) -> Optional[int]:
+    """Parses callback data in '<action>:<1-based-index>' format."""
+    try:
+        return int(str(data).rsplit(":", 1)[1])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def format_products_list(session: UserSession) -> str:
+    """Builds the current active product list text."""
+    if not session.products:
+        return (
+            f"📋 *Hujjat:* {esc(session.get_document_title())}\n"
+            "📭 Hozircha mahsulotlar ro‘yxati bo‘sh."
+        )
+
+    lines = [
+        f"📋 *Hujjat:* {esc(session.get_document_title())}",
+        f"*Kiritilgan mahsulotlar ({len(session.products)} ta):*\n",
+    ]
+    for i, product in enumerate(session.products, start=1):
+        lines.append(f"{i}. *{esc(product.name)}* — `{esc(product.barcode)}`")
+
+    pages = (len(session.products) + 11) // 12
+    lines.append(f"\n📄 *Jami betlar:* {pages} ta (A4, 12 ta/bet)")
+    lines.append("✏️ Tuzatish uchun pastdagi mahsulot raqamini bosing yoki `/edit 2` yozing.")
+    return "\n".join(lines)
+
+
+def build_products_keyboard(session: UserSession) -> InlineKeyboardMarkup:
+    """Builds inline controls for editing products and common actions."""
+    buttons = []
+    edit_row = []
+    for index, product in enumerate(session.products, start=1):
+        label = product.name
+        if len(label) > 12:
+            label = f"{label[:11]}…"
+        edit_row.append(InlineKeyboardButton(f"✏️ {index}. {label}", callback_data=f"edit:{index}"))
+        if len(edit_row) == 2:
+            buttons.append(edit_row)
+            edit_row = []
+    if edit_row:
+        buttons.append(edit_row)
+
+    buttons.extend(MAIN_INLINE_KEYBOARD.inline_keyboard)
+    return InlineKeyboardMarkup(buttons)
+
+
+def build_product_edit_keyboard(index: int) -> InlineKeyboardMarkup:
+    """Builds inline field-specific edit controls for one product."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🖼 Rasmni tuzatish", callback_data=f"edit_photo:{index}"),
+            ],
+            [
+                InlineKeyboardButton("📝 Nomni tuzatish", callback_data=f"edit_name:{index}"),
+                InlineKeyboardButton("🔢 Shtrixni tuzatish", callback_data=f"edit_barcode:{index}"),
+            ],
+            [
+                InlineKeyboardButton("🗑 O‘chirish", callback_data=f"remove:{index}"),
+                InlineKeyboardButton("📋 Ro‘yxatga qaytish", callback_data="btn_list"),
+            ],
+        ]
+    )
+
+
+async def send_products_list_message(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    session: UserSession,
+    intro: Optional[str] = None,
+) -> None:
+    """Sends the active product list with inline edit controls."""
+    text = format_products_list(session)
+    if intro:
+        text = f"{intro}\n\n{text}"
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=build_products_keyboard(session) if session.products else MAIN_INLINE_KEYBOARD,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def save_incoming_image(update: Update, user_id: int) -> Optional[str]:
+    """Downloads and stores an incoming Telegram image, returning its local path."""
+    file_bytes = None
+    ext = ".jpg"
+
+    if update.message.photo:
+        photo = update.message.photo[-1]
+        file_obj = await photo.get_file()
+        file_bytes = await file_obj.download_as_bytearray()
+        ext = ".jpg"
+    elif update.message.document and (
+        update.message.document.mime_type
+        and update.message.document.mime_type.startswith("image/")
+    ):
+        doc = update.message.document
+        file_obj = await doc.get_file()
+        file_bytes = await file_obj.download_as_bytearray()
+        ext = safe_image_extension(doc.file_name, doc.mime_type)
+
+    if not file_bytes:
+        return None
+    return session_mgr.save_draft_photo(user_id, bytes(file_bytes), ext=ext)
+
+
 async def send_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs) -> None:
     """Sends a prompt from either a normal message or callback query."""
+    kwargs.setdefault("reply_markup", HIDE_REPLY_KEYBOARD)
     if update.callback_query:
         await update.callback_query.answer()
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, **kwargs)
@@ -163,12 +290,26 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/finish — Final DOCX & PDF fayllarni yuklab olish\n"
         "/files — Oldingi hujjatlar ro‘yxati va qayta yuklash\n"
         "/list — Ro‘yxatni ko‘rish\n"
+        "/edit `<N>` — Mahsulot rasmi, nomi yoki shtrixini tuzatish\n"
         "/remove `<N>` — Mahsulotni o‘chirish (masalan: `/remove 1`)\n"
+        "/menu — Pastki katta menyuni qo‘lda ochish\n"
         "/new — Yangi hujjat boshlash va nom berish\n"
         "/cancel — Joriy kiritishni bekor qilish"
     )
     await update.message.reply_text(
-        help_text, reply_markup=MAIN_REPLY_KEYBOARD, parse_mode=ParseMode.MARKDOWN
+        help_text, reply_markup=HIDE_REPLY_KEYBOARD, parse_mode=ParseMode.MARKDOWN
+    )
+    await update.message.reply_text(
+        "Tezkor amallar:",
+        reply_markup=MAIN_INLINE_KEYBOARD,
+    )
+
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows the optional bottom reply keyboard only when explicitly requested."""
+    await update.message.reply_text(
+        "☰ Pastki menyu ochildi. Tugmani bosganingizdan keyin u yana yopiladi.",
+        reply_markup=MAIN_REPLY_KEYBOARD,
     )
 
 
@@ -194,49 +335,13 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     session = session_mgr.get_session(user_id)
 
-    target_msg = update.message or (update.callback_query.message if update.callback_query else None)
-
-    if not session.products:
-        text = "📭 Hozircha mahsulotlar ro‘yxati bo‘sh.\nMahsulot qo‘shish uchun /add bosing."
-        if update.callback_query:
-            await update.callback_query.answer()
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=text,
-                reply_markup=MAIN_REPLY_KEYBOARD,
-            )
-        else:
-            await update.message.reply_text(
-                text, reply_markup=MAIN_REPLY_KEYBOARD, parse_mode=ParseMode.MARKDOWN
-            )
-        return
-
-    lines = [
-        f"📋 *Hujjat:* {esc(session.get_document_title())}",
-        f"*Kiritilgan mahsulotlar ({len(session.products)} ta):*\n",
-    ]
-    for i, p in enumerate(session.products, start=1):
-        lines.append(f"{i}. *{esc(p.name)}* — `{esc(p.barcode)}`")
-
-    pages = (len(session.products) + 11) // 12
-    lines.append(f"\n📄 *Jami betlar:* {pages} ta (A4, 12 ta/bet)")
-    lines.append("\n👉 /add — Qo‘shish | /preview — Tekshirish | /finish — Yakunlash")
-
-    msg_text = "\n".join(lines)
     if update.callback_query:
         await update.callback_query.answer()
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=msg_text,
-            reply_markup=MAIN_INLINE_KEYBOARD,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-    else:
-        await update.message.reply_text(
-            msg_text,
-            reply_markup=MAIN_REPLY_KEYBOARD,
-            parse_mode=ParseMode.MARKDOWN,
-        )
+    await send_products_list_message(
+        context=context,
+        chat_id=update.effective_chat.id,
+        session=session,
+    )
 
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -249,6 +354,7 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "⚠️ Iltimos, o‘chiriladigan mahsulot raqamini ko‘rsating.\n"
             "Masalan: `/remove 1`.\n"
             "Raqamlarni ko‘rish uchun /list buyrug‘idan foydalaning.",
+            reply_markup=HIDE_REPLY_KEYBOARD,
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -261,6 +367,7 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(
             f"⚠️ #{idx} raqamli mahsulot topilmadi. Sizda jami {total} ta mahsulot mavjud.\n"
             "Ro‘yxatni ko‘rish uchun /list bosing.",
+            reply_markup=HIDE_REPLY_KEYBOARD,
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -268,8 +375,295 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(
         f"🗑️ #{idx} o‘chirildi: *{esc(removed.name)}* (`{esc(removed.barcode)}`).\n"
         f"Qolgan mahsulotlar: {len(session.products)} ta.",
-        reply_markup=MAIN_REPLY_KEYBOARD,
+        reply_markup=HIDE_REPLY_KEYBOARD,
         parse_mode=ParseMode.MARKDOWN,
+    )
+    await send_products_list_message(
+        context=context,
+        chat_id=update.effective_chat.id,
+        session=session,
+    )
+
+
+async def show_product_edit_options(
+    *,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    index: int,
+) -> None:
+    """Shows field-specific edit options for one product."""
+    user_id = update.effective_user.id
+    session = session_mgr.get_session(user_id)
+    product = session.get_product(index)
+
+    if not product:
+        text = f"⚠️ #{index} raqamli mahsulot topilmadi. Ro‘yxatni yangilash uchun /list bosing."
+        if update.callback_query:
+            await update.callback_query.answer("Mahsulot topilmadi", show_alert=True)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=text,
+                reply_markup=MAIN_INLINE_KEYBOARD,
+            )
+        else:
+            await update.message.reply_text(
+                text,
+                reply_markup=HIDE_REPLY_KEYBOARD,
+            )
+        return
+
+    text = (
+        f"✏️ *#{index} mahsulotni tuzatish*\n\n"
+        f"📦 Nomi: *{esc(product.name)}*\n"
+        f"🔢 Shtrix: `{esc(product.barcode)}`\n\n"
+        "Qaysi qismini tuzatmoqchisiz?"
+    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            reply_markup=build_product_edit_keyboard(index),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=build_product_edit_keyboard(index),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+
+async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /edit N command by showing field-specific edit options."""
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text(
+            "⚠️ Qaysi mahsulotni tuzatishni raqam bilan yuboring.\n"
+            "Masalan: `/edit 2`.\n\n"
+            "Raqamlarni ko‘rish uchun /list bosing.",
+            reply_markup=HIDE_REPLY_KEYBOARD,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    await show_product_edit_options(
+        update=update,
+        context=context,
+        index=int(context.args[0]),
+    )
+
+
+async def start_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE, field: str) -> int:
+    """Starts an edit conversation for one product field."""
+    query = update.callback_query
+    index = parse_index_from_callback(query.data if query else "")
+    user_id = update.effective_user.id
+    session = session_mgr.get_session(user_id)
+
+    if not index or not session.get_product(index):
+        if query:
+            await query.answer("Mahsulot topilmadi", show_alert=True)
+        return ConversationHandler.END
+
+    context.user_data["edit_index"] = index
+    context.user_data["edit_field"] = field
+
+    if field == "photo":
+        text = (
+            f"🖼 *#{index} mahsulot rasmi tuzatilyapti.*\n\n"
+            "Yangi rasmni yuboring. Bekor qilish uchun /cancel bosing."
+        )
+        next_state = STATE_WAITING_EDIT_PHOTO
+    elif field == "name":
+        text = (
+            f"📝 *#{index} mahsulot nomi tuzatilyapti.*\n\n"
+            "Yangi nomni yuboring. Bekor qilish uchun /cancel bosing."
+        )
+        next_state = STATE_WAITING_EDIT_NAME
+    else:
+        text = (
+            f"🔢 *#{index} mahsulot shtrix-kodi tuzatilyapti.*\n\n"
+            "Yangi barcode/kodni yuboring. Bekor qilish uchun /cancel bosing."
+        )
+        next_state = STATE_WAITING_EDIT_BARCODE
+
+    await send_prompt(update, context, text, parse_mode=ParseMode.MARKDOWN)
+    return next_state
+
+
+async def edit_photo_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts product image edit."""
+    return await start_edit_field(update, context, "photo")
+
+
+async def edit_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts product name edit."""
+    return await start_edit_field(update, context, "name")
+
+
+async def edit_barcode_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts product barcode edit."""
+    return await start_edit_field(update, context, "barcode")
+
+
+def clear_edit_context(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clears edit state stored in Telegram user_data."""
+    context.user_data.pop("edit_index", None)
+    context.user_data.pop("edit_field", None)
+
+
+async def finish_product_edit(
+    *,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    session: UserSession,
+    message: str,
+) -> int:
+    """Sends edit confirmation and refreshed list."""
+    clear_edit_context(context)
+    await update.message.reply_text(
+        message,
+        reply_markup=HIDE_REPLY_KEYBOARD,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    await send_products_list_message(
+        context=context,
+        chat_id=update.effective_chat.id,
+        session=session,
+    )
+    return ConversationHandler.END
+
+
+async def edit_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives and saves a replacement product photo."""
+    user_id = update.effective_user.id
+    session = session_mgr.get_session(user_id)
+    index = int(context.user_data.get("edit_index") or 0)
+
+    if not session.get_product(index):
+        clear_edit_context(context)
+        await update.message.reply_text("⚠️ Mahsulot topilmadi. Iltimos, /list orqali qaytadan tanlang.")
+        return ConversationHandler.END
+
+    photo_path = await save_incoming_image(update, user_id)
+    if not photo_path:
+        await update.message.reply_text(
+            "⚠️ Iltimos, yangi mahsulot rasmini yuboring, yoki /cancel bosing.",
+            reply_markup=HIDE_REPLY_KEYBOARD,
+        )
+        return STATE_WAITING_EDIT_PHOTO
+
+    updated = session.update_product_image(index, photo_path)
+    if not updated:
+        clear_edit_context(context)
+        await update.message.reply_text("⚠️ Mahsulot topilmadi. Iltimos, /list orqali qaytadan tanlang.")
+        return ConversationHandler.END
+
+    return await finish_product_edit(
+        update=update,
+        context=context,
+        session=session,
+        message=f"✅ #{index} mahsulot rasmi yangilandi: *{esc(updated.name)}*.",
+    )
+
+
+async def edit_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives and saves a replacement product name."""
+    user_id = update.effective_user.id
+    session = session_mgr.get_session(user_id)
+    index = int(context.user_data.get("edit_index") or 0)
+    new_name = update.message.text.strip()
+
+    if not new_name:
+        await update.message.reply_text(
+            "⚠️ Mahsulot nomi bo‘sh bo‘lishi mumkin emas. Yangi nomni yuboring:",
+            reply_markup=HIDE_REPLY_KEYBOARD,
+        )
+        return STATE_WAITING_EDIT_NAME
+
+    updated = session.update_product_name(index, new_name)
+    if not updated:
+        clear_edit_context(context)
+        await update.message.reply_text("⚠️ Mahsulot topilmadi. Iltimos, /list orqali qaytadan tanlang.")
+        return ConversationHandler.END
+
+    return await finish_product_edit(
+        update=update,
+        context=context,
+        session=session,
+        message=f"✅ #{index} mahsulot nomi yangilandi: *{esc(updated.name)}*.",
+    )
+
+
+async def edit_barcode_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives, validates, and saves a replacement barcode/code value."""
+    user_id = update.effective_user.id
+    session = session_mgr.get_session(user_id)
+    index = int(context.user_data.get("edit_index") or 0)
+    new_barcode = update.message.text.strip()
+
+    if not new_barcode:
+        await update.message.reply_text(
+            "⚠️ Barcode bo‘sh bo‘lishi mumkin emas. Yangi kodni yuboring:",
+            reply_markup=HIDE_REPLY_KEYBOARD,
+        )
+        return STATE_WAITING_EDIT_BARCODE
+
+    temp_check = session.session_dir / "temp_check.png"
+    try:
+        generate_barcode_image(new_barcode, temp_check)
+        if temp_check.is_file():
+            temp_check.unlink(missing_ok=True)
+    except Exception as e:
+        await update.message.reply_text(
+            f"⚠️ Barcode hosil qilib bo‘lmadi `{esc(new_barcode)}`: {esc(e)}\n"
+            "Iltimos, yaroqli kod yuboring:",
+            reply_markup=HIDE_REPLY_KEYBOARD,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return STATE_WAITING_EDIT_BARCODE
+
+    updated = session.update_product_barcode(index, new_barcode)
+    if not updated:
+        clear_edit_context(context)
+        await update.message.reply_text("⚠️ Mahsulot topilmadi. Iltimos, /list orqali qaytadan tanlang.")
+        return ConversationHandler.END
+
+    return await finish_product_edit(
+        update=update,
+        context=context,
+        session=session,
+        message=f"✅ #{index} mahsulot shtrixi yangilandi: `{esc(updated.barcode)}`.",
+    )
+
+
+async def remove_product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Removes a product from an inline edit button."""
+    query = update.callback_query
+    index = parse_index_from_callback(query.data if query else "")
+    user_id = update.effective_user.id
+    session = session_mgr.get_session(user_id)
+
+    if not index:
+        await query.answer("Noto‘g‘ri mahsulot raqami", show_alert=True)
+        return
+
+    removed = session.remove_product(index)
+    if not removed:
+        await query.answer("Mahsulot topilmadi", show_alert=True)
+        return
+
+    await query.answer("O‘chirildi")
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"🗑️ #{index} o‘chirildi: *{esc(removed.name)}* (`{esc(removed.barcode)}`).",
+        reply_markup=HIDE_REPLY_KEYBOARD,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    await send_products_list_message(
+        context=context,
+        chat_id=update.effective_chat.id,
+        session=session,
     )
 
 
@@ -306,6 +700,12 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return STATE_WAITING_DOCUMENT_NAME
 
+    await send_products_list_message(
+        context=context,
+        chat_id=update.effective_chat.id,
+        session=session,
+        intro="➕ *Yangi mahsulot qo‘shishdan oldin hozirgi ro‘yxat:*",
+    )
     return await ask_product_photo(update, context)
 
 
@@ -318,6 +718,7 @@ async def document_name_received(update: Update, context: ContextTypes.DEFAULT_T
     if not document_name:
         await update.message.reply_text(
             "⚠️ Hujjat nomi bo‘sh bo‘lishi mumkin emas. Iltimos, nom yuboring:",
+            reply_markup=HIDE_REPLY_KEYBOARD,
             parse_mode=ParseMode.MARKDOWN,
         )
         return STATE_WAITING_DOCUMENT_NAME
@@ -327,6 +728,7 @@ async def document_name_received(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text(
         f"✅ Hujjat nomi saqlandi: *{esc(document_name)}*\n\n"
         "Endi birinchi mahsulot rasmini yuboring.",
+        reply_markup=HIDE_REPLY_KEYBOARD,
         parse_mode=ParseMode.MARKDOWN,
     )
     return STATE_WAITING_PHOTO
@@ -337,37 +739,22 @@ async def add_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     session = session_mgr.get_session(user_id)
 
-    file_bytes = None
-    ext = ".jpg"
-
-    if update.message.photo:
-        photo = update.message.photo[-1]
-        file_obj = await photo.get_file()
-        file_bytes = await file_obj.download_as_bytearray()
-        ext = ".jpg"
-    elif update.message.document and (
-        update.message.document.mime_type
-        and update.message.document.mime_type.startswith("image/")
-    ):
-        doc = update.message.document
-        file_obj = await doc.get_file()
-        file_bytes = await file_obj.download_as_bytearray()
-        ext = safe_image_extension(doc.file_name, doc.mime_type)
-
-    if not file_bytes:
+    photo_path = await save_incoming_image(update, user_id)
+    if not photo_path:
         await update.message.reply_text(
             "⚠️ Iltimos, mahsulot rasmini yuboring, yoki /cancel bosing.",
+            reply_markup=HIDE_REPLY_KEYBOARD,
             parse_mode=ParseMode.MARKDOWN,
         )
         return STATE_WAITING_PHOTO
 
-    photo_path = session_mgr.save_draft_photo(user_id, bytes(file_bytes), ext=ext)
     session.current_draft["photo_path"] = photo_path
 
     await update.message.reply_text(
         "✅ Rasm qabul qilindi!\n\n"
         "📝 *2/3-qadam: Mahsulot nomi*\n"
         "Iltimos, mahsulot nomini yuboring (masalan: `Perexod 76-50mm`):",
+        reply_markup=HIDE_REPLY_KEYBOARD,
         parse_mode=ParseMode.MARKDOWN,
     )
     return STATE_WAITING_NAME
@@ -382,6 +769,7 @@ async def add_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not name:
         await update.message.reply_text(
             "⚠️ Mahsulot nomi bo‘sh bo‘lishi mumkin emas. Iltimos, nomni yuboring:",
+            reply_markup=HIDE_REPLY_KEYBOARD,
             parse_mode=ParseMode.MARKDOWN,
         )
         return STATE_WAITING_NAME
@@ -392,6 +780,7 @@ async def add_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"✅ Nom saqlandi: *{esc(name)}*\n\n"
         "🔢 *3/3-qadam: Barcode / Kod qiymati*\n"
         "Iltimos, shtrix-kod yoki mahsulot kodini yuboring (masalan: `1000049` yoki 13 xonali EAN):",
+        reply_markup=HIDE_REPLY_KEYBOARD,
         parse_mode=ParseMode.MARKDOWN,
     )
     return STATE_WAITING_BARCODE
@@ -406,6 +795,7 @@ async def add_barcode_received(update: Update, context: ContextTypes.DEFAULT_TYP
     if not barcode_val:
         await update.message.reply_text(
             "⚠️ Barcode bo‘sh bo‘lishi mumkin emas. Iltimos, kodni yuboring:",
+            reply_markup=HIDE_REPLY_KEYBOARD,
             parse_mode=ParseMode.MARKDOWN,
         )
         return STATE_WAITING_BARCODE
@@ -420,6 +810,7 @@ async def add_barcode_received(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             f"⚠️ Barcode hosil qilib bo‘lmadi `{esc(barcode_val)}`: {esc(e)}\n"
             "Iltimos, yaroqli kod yuboring:",
+            reply_markup=HIDE_REPLY_KEYBOARD,
             parse_mode=ParseMode.MARKDOWN,
         )
         return STATE_WAITING_BARCODE
@@ -430,6 +821,7 @@ async def add_barcode_received(update: Update, context: ContextTypes.DEFAULT_TYP
     if not photo_path or not prod_name:
         await update.message.reply_text(
             "⚠️ Ma’lumotlar to‘liq emas. Iltimos, /add orqali qaytadan boshlang.",
+            reply_markup=HIDE_REPLY_KEYBOARD,
             parse_mode=ParseMode.MARKDOWN,
         )
         session.reset_draft()
@@ -456,7 +848,7 @@ async def add_barcode_received(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await update.message.reply_text(
         confirmation_text,
-        reply_markup=MAIN_REPLY_KEYBOARD,
+        reply_markup=HIDE_REPLY_KEYBOARD,
         parse_mode=ParseMode.MARKDOWN,
     )
     # Also attach inline keyboard for quick 1-tap action
@@ -486,6 +878,7 @@ async def cmd_done_in_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(
         "ℹ️ `/done` buyrug‘i kerak emas! Barcode kiritilishi bilanoq mahsulot avtomatik saqlanadi.\n"
         f"Iltimos, {next_step} Bekor qilish uchun /cancel bosing.",
+        reply_markup=HIDE_REPLY_KEYBOARD,
         parse_mode=ParseMode.MARKDOWN,
     )
     return next_state
@@ -499,7 +892,7 @@ async def cmd_done_global(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "• /add — Yangi mahsulot qo‘shish\n"
         "• /preview — Tekshirib ko‘rish\n"
         "• /finish — Hujjatni yuklab olish",
-        reply_markup=MAIN_REPLY_KEYBOARD,
+        reply_markup=HIDE_REPLY_KEYBOARD,
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -509,10 +902,11 @@ async def cmd_cancel_in_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     session = session_mgr.get_session(user_id)
     session.reset_draft()
+    clear_edit_context(context)
     await update.message.reply_text(
         "❌ Mahsulot kiritish bekor qilindi.\n"
         "Yangi mahsulot kiritish uchun /add bosing yoki mavjudlarini olish uchun /finish bosing.",
-        reply_markup=MAIN_REPLY_KEYBOARD,
+        reply_markup=HIDE_REPLY_KEYBOARD,
         parse_mode=ParseMode.MARKDOWN,
     )
     return ConversationHandler.END
@@ -520,10 +914,11 @@ async def cmd_cancel_in_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def cmd_cancel_global(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles /cancel outside of conversation."""
+    clear_edit_context(context)
     await update.message.reply_text(
         "ℹ️ Hozirda bekor qilinadigan jarayon yo‘q.\n"
         "Mahsulot qo‘shish uchun /add yoki ro‘yxatni ko‘rish uchun /list bosing.",
-        reply_markup=MAIN_REPLY_KEYBOARD,
+        reply_markup=HIDE_REPLY_KEYBOARD,
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -617,7 +1012,7 @@ async def send_export_record_documents(
         await context.bot.send_message(
             chat_id=chat_id,
             text="⚠️ Bu hujjat fayllari topilmadi. U o‘chirilgan yoki 30 kunlik muddatdan o‘tgan bo‘lishi mumkin.",
-            reply_markup=MAIN_REPLY_KEYBOARD,
+            reply_markup=HIDE_REPLY_KEYBOARD,
         )
 
 
@@ -634,7 +1029,7 @@ async def _generate_and_send_documents(
         await context.bot.send_message(
             chat_id=chat_id,
             text="⚠️ Hozircha hech qanday mahsulot qo‘shilmagan.\nKamida bitta mahsulot qo‘shish uchun /add bosing.",
-            reply_markup=MAIN_REPLY_KEYBOARD,
+            reply_markup=HIDE_REPLY_KEYBOARD,
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -770,10 +1165,10 @@ async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=text,
-                reply_markup=MAIN_REPLY_KEYBOARD,
+                reply_markup=HIDE_REPLY_KEYBOARD,
             )
         else:
-            await update.message.reply_text(text, reply_markup=MAIN_REPLY_KEYBOARD)
+            await update.message.reply_text(text, reply_markup=HIDE_REPLY_KEYBOARD)
         return
 
     lines = ["🗂 *Oldingi hujjatlar:*\n"]
@@ -829,6 +1224,21 @@ async def handle_inline_callbacks(update: Update, context: ContextTypes.DEFAULT_
         await cmd_list(update, context)
     elif query.data == "btn_files":
         await cmd_files(update, context)
+    elif query.data == "btn_menu":
+        await query.answer()
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="☰ Pastki menyu ochildi. Tugmani bosganingizdan keyin u yana yopiladi.",
+            reply_markup=MAIN_REPLY_KEYBOARD,
+        )
+    elif query.data.startswith("edit:"):
+        index = parse_index_from_callback(query.data)
+        if not index:
+            await query.answer("Noto‘g‘ri mahsulot raqami", show_alert=True)
+            return
+        await show_product_edit_options(update=update, context=context, index=index)
+    elif query.data.startswith("remove:"):
+        await remove_product_callback(update, context)
 
 
 async def cleanup_old_files_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -857,8 +1267,10 @@ async def post_init(application) -> None:
         BotCommand("finish", "Final hujjatlarni yuklab olish"),
         BotCommand("files", "Oldingi hujjatlarni qayta yuklash"),
         BotCommand("list", "Kiritilgan mahsulotlar ro‘yxati"),
+        BotCommand("edit", "Mahsulotni tuzatish"),
         BotCommand("remove", "N-raqamli mahsulotni o‘chirish"),
         BotCommand("new", "Yangi hujjat boshlash"),
+        BotCommand("menu", "Pastki menyuni qo‘lda ochish"),
         BotCommand("cancel", "Kiritishni bekor qilish"),
     ]
     try:
@@ -900,6 +1312,9 @@ def create_bot_application() -> object:
             MessageHandler(filters.Regex(r"^(➕ Keyingi mahsulot|➕ /add)$"), add_start),
             CallbackQueryHandler(new_document_start, pattern="^btn_new$"),
             CallbackQueryHandler(add_start, pattern="^btn_add$"),
+            CallbackQueryHandler(edit_photo_start, pattern=r"^edit_photo:\d+$"),
+            CallbackQueryHandler(edit_name_start, pattern=r"^edit_name:\d+$"),
+            CallbackQueryHandler(edit_barcode_start, pattern=r"^edit_barcode:\d+$"),
         ],
         states={
             STATE_WAITING_DOCUMENT_NAME: [
@@ -918,6 +1333,15 @@ def create_bot_application() -> object:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_barcode_received),
                 CommandHandler("done", cmd_done_in_conv),
             ],
+            STATE_WAITING_EDIT_PHOTO: [
+                MessageHandler(filters.PHOTO | (filters.Document.IMAGE), edit_photo_received),
+            ],
+            STATE_WAITING_EDIT_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_name_received),
+            ],
+            STATE_WAITING_EDIT_BARCODE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_barcode_received),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel_in_conv)],
         per_chat=True,
@@ -930,7 +1354,7 @@ def create_bot_application() -> object:
     app.add_handler(conv_handler)
 
     # Register inline button callbacks
-    app.add_handler(CallbackQueryHandler(handle_inline_callbacks, pattern=r"^(btn_(preview|finish|list|files)|file:[a-f0-9]{12})$"))
+    app.add_handler(CallbackQueryHandler(handle_inline_callbacks, pattern=r"^(btn_(preview|finish|list|files|menu)|file:[a-f0-9]{12}|edit:\d+|remove:\d+)$"))
 
     # Register button text handlers
     app.add_handler(MessageHandler(filters.Regex(r"^(👀 Preview olish|👀 /preview)$"), cmd_preview))
@@ -941,10 +1365,12 @@ def create_bot_application() -> object:
     # Register global command handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("edit", cmd_edit))
     app.add_handler(CommandHandler("remove", cmd_remove))
     app.add_handler(CommandHandler("preview", cmd_preview))
     app.add_handler(CommandHandler("finish", cmd_finish))
     app.add_handler(CommandHandler("files", cmd_files))
+    app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(CommandHandler("done", cmd_done_global))
     app.add_handler(CommandHandler("cancel", cmd_cancel_global))
 

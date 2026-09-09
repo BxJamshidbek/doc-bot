@@ -26,6 +26,13 @@ A Python Telegram bot that generates professional, cashier-ready printable A4 pr
   - `/new` asks for a document name before the first product is collected.
   - Generated filenames include the document name when available.
   - `/files` shows recent preview/final documents and lets users download DOCX/PDF again.
+- **Product Correction Flow**:
+  - `/list` shows each added product with inline edit buttons.
+  - `/edit <N>` lets users correct product photo, name, or barcode without rebuilding the whole document.
+  - Corrected products keep their original order on the sheet.
+- **Optional Bottom Menu**:
+  - The large Telegram reply keyboard is not persistent by default.
+  - `/menu` opens the bottom menu manually when needed; normal bot replies keep it hidden.
 - **Per-User Session Management**:
   - Each Telegram user has an isolated session and directory.
   - Generated DOCX/PDF files are stored separately under `data/generated/<telegram_user_id>/`.
@@ -144,7 +151,9 @@ By default, the bot starts in polling mode. For webhook deployment, set `BOT_RUN
 | `/preview` | Generates and sends a preview DOCX/PDF without clearing the list. |
 | `/finish` | Compiles final printable DOCX & PDF files and sends them to the user without clearing the list. |
 | `/files` | Shows previous preview/final documents and lets the user download them again. |
+| `/edit <N>` | Opens correction controls for product number `N` (photo, name, or barcode). |
 | `/cancel` | Cancels the current `/add` product input flow. |
+| `/menu` | Opens the optional bottom Telegram keyboard manually. |
 
 > **Note on `/done`**: `/done` is not needed in the active workflow. Products are automatically committed and confirmed immediately after you submit the barcode value.
 
@@ -154,10 +163,18 @@ By default, the bot starts in polling mode. For webhook deployment, set `BOT_RUN
 3. Type the product name (e.g., `Perexod 76-50mm`).
 4. Type the barcode or code (e.g., `1000049`, `5901234123457`, or internal code).
 5. The product is **automatically saved and confirmed** with its position on the sheet.
-6. Use `/add` to add the next product.
+6. Use `/add` to add the next product. The current product list is shown before the next photo prompt.
 7. Use `/preview` at any time to download a test document without stopping the current list.
 8. Use `/finish` at any time to download the final document. The list is kept; use `/new` only when you want to start a fresh sheet.
 9. Use `/files` to download previous preview/final documents again while they are still within the retention period.
+
+### Correcting a Product
+
+If a product photo, name, or barcode is wrong:
+1. Send `/list`.
+2. Press the product's `✏️` button, or send `/edit <N>` (for example, `/edit 2`).
+3. Choose `Rasmni tuzatish`, `Nomni tuzatish`, or `Shtrixni tuzatish`.
+4. Send the replacement value. The bot updates the same product position and shows the refreshed list.
 
 ### Photo Quality Guidance
 

@@ -168,6 +168,54 @@ class UserSession:
         self._save_state()
         return len(self.products)
 
+    def get_product(self, index_1_based: int) -> Optional[ProductItem]:
+        """Returns a product by 1-based index."""
+        if 1 <= index_1_based <= len(self.products):
+            return self.products[index_1_based - 1]
+        return None
+
+    def update_product_name(self, index_1_based: int, name: str) -> Optional[ProductItem]:
+        """Updates a product name by 1-based index."""
+        item = self.get_product(index_1_based)
+        if not item:
+            return None
+        item.name = name.strip()
+        self._save_state()
+        return item
+
+    def update_product_barcode(self, index_1_based: int, barcode: str) -> Optional[ProductItem]:
+        """Updates a product barcode by 1-based index."""
+        item = self.get_product(index_1_based)
+        if not item:
+            return None
+        item.barcode = barcode.strip()
+        self._save_state()
+        return item
+
+    def update_product_image(self, index_1_based: int, image_path: str) -> Optional[ProductItem]:
+        """Updates a product image and removes the replaced bot-owned file when safe."""
+        item = self.get_product(index_1_based)
+        if not item:
+            return None
+
+        old_path = Path(item.image_path)
+        item.image_path = str(image_path)
+        self._save_state()
+
+        try:
+            resolved_old = old_path.resolve()
+            still_used = any(
+                Path(prod.image_path).resolve() == resolved_old
+                for prod in self.products
+                if prod.image_path
+            )
+            if not still_used:
+                self._safe_unlink(resolved_old, [self.session_dir])
+        except Exception:
+            pass
+
+        return item
+
     def remove_product(self, index_1_based: int) -> Optional[ProductItem]:
         """Removes a product by 1-based index."""
         if 1 <= index_1_based <= len(self.products):
