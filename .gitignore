@@ -1,0 +1,30 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+env/
+venv/
+
+# Environment variables
+.env
+
+# Session & temporary data
+data/
+temp/
+render_verification_outputs/
+sample_perexod.png
+*.docx
+*.pdf
+*.log
+
+# Test/cache artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# macOS
+.DS_Store
