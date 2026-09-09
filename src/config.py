@@ -40,7 +40,7 @@ WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram-webhook").strip() or "/teleg
 if not WEBHOOK_PATH.startswith("/"):
     WEBHOOK_PATH = f"/{WEBHOOK_PATH}"
 WEBHOOK_LISTEN_HOST = os.getenv("WEBHOOK_LISTEN_HOST", "127.0.0.1").strip() or "127.0.0.1"
-WEBHOOK_LISTEN_PORT = _env_int("WEBHOOK_LISTEN_PORT", 8080)
+WEBHOOK_LISTEN_PORT = _env_int("WEBHOOK_LISTEN_PORT", 8091)
 WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "").strip()
 
 # Page and Label layout dimensions (A4 standard)

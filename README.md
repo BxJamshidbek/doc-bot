@@ -262,7 +262,7 @@ BOT_RUN_MODE=webhook
 WEBHOOK_BASE_URL=https://bot.example.com
 WEBHOOK_PATH=/tg/replace_with_random_path
 WEBHOOK_LISTEN_HOST=127.0.0.1
-WEBHOOK_LISTEN_PORT=8080
+WEBHOOK_LISTEN_PORT=8091
 WEBHOOK_SECRET_TOKEN=replace_with_random_secret
 SESSION_DIR=/root/doc bot/data/sessions
 GENERATED_DIR=/root/doc bot/data/generated
@@ -279,7 +279,7 @@ server {
     client_max_body_size 50M;
 
     location /tg/replace_with_random_path {
-        proxy_pass http://127.0.0.1:8080/tg/replace_with_random_path;
+        proxy_pass http://127.0.0.1:8091/tg/replace_with_random_path;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
