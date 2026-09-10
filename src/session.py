@@ -216,6 +216,23 @@ class UserSession:
 
         return item
 
+    def swap_products(self, first_index_1_based: int, second_index_1_based: int) -> Optional[tuple[ProductItem, ProductItem]]:
+        """Swaps two products by their 1-based positions and persists state."""
+        if not (
+            1 <= first_index_1_based <= len(self.products)
+            and 1 <= second_index_1_based <= len(self.products)
+        ):
+            return None
+
+        first_idx = first_index_1_based - 1
+        second_idx = second_index_1_based - 1
+        first_item = self.products[first_idx]
+        second_item = self.products[second_idx]
+        if first_idx != second_idx:
+            self.products[first_idx], self.products[second_idx] = second_item, first_item
+            self._save_state()
+        return first_item, second_item
+
     def remove_product(self, index_1_based: int) -> Optional[ProductItem]:
         """Removes a product by 1-based index."""
         if 1 <= index_1_based <= len(self.products):

@@ -186,6 +186,36 @@ class TestSessionManager(unittest.TestCase):
         saved_names = [p.name for p in session.products]
         self.assertEqual(saved_names, names)
 
+    def test_swap_products_preserves_images_and_persists_order(self):
+        session = self.mgr.get_session(12345)
+        image_paths = []
+        for index in range(1, 4):
+            image_path = session.session_dir / f"{index}.png"
+            image_path.write_text(f"image-{index}", encoding="utf-8")
+            image_paths.append(str(image_path))
+        session.add_product("First", "1", image_paths[0])
+        session.add_product("Second", "2", image_paths[1])
+        session.add_product("Third", "3", image_paths[2])
+
+        swapped = session.swap_products(1, 3)
+
+        self.assertIsNotNone(swapped)
+        self.assertEqual([p.name for p in session.products], ["Third", "Second", "First"])
+        self.assertEqual([p.barcode for p in session.products], ["3", "2", "1"])
+        self.assertEqual([p.image_path for p in session.products], [image_paths[2], image_paths[1], image_paths[0]])
+
+        reloaded = SessionManager(self.session_base, self.generated_base).get_session(12345)
+        self.assertEqual([p.name for p in reloaded.products], ["Third", "Second", "First"])
+
+    def test_swap_products_rejects_invalid_indexes(self):
+        session = self.mgr.get_session(12345)
+        session.add_product("First", "1", "/fake/1.png")
+        session.add_product("Second", "2", "/fake/2.png")
+
+        self.assertIsNone(session.swap_products(0, 2))
+        self.assertIsNone(session.swap_products(1, 3))
+        self.assertEqual([p.name for p in session.products], ["First", "Second"])
+
     def test_remove_product(self):
         session = self.mgr.get_session(12345)
         session.add_product("First", "1", "/fake/1.png")
@@ -482,6 +512,23 @@ class TestDocxGeneration(unittest.TestCase):
         # Remaining cells on page 2 are empty for cutting
         self.assertEqual(doc.tables[1].cell(0, 1).paragraphs[0].text, "")
 
+    def test_docx_uses_swapped_session_order(self):
+        mgr = SessionManager(self.temp_dir / "sessions", self.temp_dir / "generated")
+        session = mgr.get_session(777)
+        session.add_product("First", "111", str(self.img_path))
+        session.add_product("Second", "222", str(self.img_path))
+        session.add_product("Third", "333", str(self.img_path))
+        session.swap_products(1, 3)
+
+        doc_path = self.temp_dir / "swapped.docx"
+        created = create_label_sheet(session.products, doc_path)
+        doc = docx.Document(created)
+
+        self.assertEqual(doc.tables[0].cell(0, 0).paragraphs[1].text, "Third")
+        self.assertEqual(doc.tables[0].cell(0, 0).paragraphs[3].text, "333")
+        self.assertEqual(doc.tables[0].cell(0, 1).paragraphs[1].text, "Second")
+        self.assertEqual(doc.tables[0].cell(0, 2).paragraphs[1].text, "First")
+
 
 class TestBotEscaping(unittest.TestCase):
     def test_markdown_escaping(self):
@@ -524,6 +571,7 @@ class TestBotEscaping(unittest.TestCase):
 
             list_text = format_products_list(session)
             self.assertIn("/edit 2", list_text)
+            self.assertIn("/swap 2 7", list_text)
             self.assertIn("Perexod", list_text)
 
             keyboard = build_products_keyboard(session)
@@ -544,7 +592,7 @@ class TestBotEscaping(unittest.TestCase):
             ]
             self.assertEqual(
                 edit_callbacks,
-                ["edit_photo:2", "edit_name:2", "edit_barcode:2", "remove:2", "btn_list"],
+                ["edit_photo:2", "edit_name:2", "edit_barcode:2", "swap:2", "remove:2", "btn_list"],
             )
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

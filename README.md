@@ -31,6 +31,7 @@ A Python Telegram bot that generates professional, cashier-ready printable A4 pr
 - **Product Correction Flow**:
   - `/list` shows each added product with inline edit buttons.
   - `/edit <N>` lets users correct product photo, name, or barcode without rebuilding the whole document.
+  - `/swap <A> <B>` swaps any two product positions before preview/final export.
   - Corrected products keep their original order on the sheet.
 - **Optional Bottom Menu**:
   - The large Telegram reply keyboard is not persistent by default.
@@ -154,6 +155,7 @@ By default, the bot starts in polling mode. For webhook deployment, set `BOT_RUN
 | `/add` | Initiates the 3-step prompt flow to add a new product. |
 | `/list` | Displays the current ordered list of products and page count. |
 | `/remove <N>` | Removes product number `N` from the sheet (e.g. `/remove 2`). |
+| `/swap <A> <B>` | Swaps two product positions on the sheet (e.g. `/swap 2 7`). |
 | `/preview` | Generates and sends a preview DOCX/PDF without clearing the list. |
 | `/finish` | Compiles final printable DOCX & PDF files and sends them to the user without clearing the list. |
 | `/files` | Shows previous preview/final documents and lets the user download them again. |
@@ -170,9 +172,10 @@ By default, the bot starts in polling mode. For webhook deployment, set `BOT_RUN
 4. Type the barcode or code (e.g., `1000049`, `5901234123457`, or internal code).
 5. The product is **automatically saved and confirmed** with its position on the sheet.
 6. Use `/add` to add the next product. The current product list is shown before the next photo prompt.
-7. Use `/preview` at any time to download a test document without stopping the current list.
-8. Use `/finish` at any time to download the final document. The list is kept; use `/new` only when you want to start a fresh sheet.
-9. Use `/files` to download previous preview/final documents again while they are still within the retention period.
+7. Use `/swap 2 7` when you need to exchange two product positions before printing.
+8. Use `/preview` at any time to download a test document without stopping the current list.
+9. Use `/finish` at any time to download the final document. The list is kept; use `/new` only when you want to start a fresh sheet.
+10. Use `/files` to download previous preview/final documents again while they are still within the retention period.
 
 ### Correcting a Product
 
@@ -181,6 +184,15 @@ If a product photo, name, or barcode is wrong:
 2. Press the product's `✏️` button, or send `/edit <N>` (for example, `/edit 2`).
 3. Choose `Rasmni tuzatish`, `Nomni tuzatish`, or `Shtrixni tuzatish`.
 4. Send the replacement value. The bot updates the same product position and shows the refreshed list.
+
+### Swapping Product Positions
+
+If two products are in the wrong positions:
+1. Send `/list` to see the product numbers.
+2. Send `/swap <A> <B>` (for example, `/swap 2 7`).
+3. The bot swaps those two positions and shows the refreshed list.
+
+You can also press a product's `✏️` button, choose `Joyini almashtirish`, then send the target product number.
 
 ### Photo Quality Guidance
 
