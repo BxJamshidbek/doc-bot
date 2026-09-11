@@ -233,6 +233,32 @@ class UserSession:
             self._save_state()
         return first_item, second_item
 
+    def move_product_to_position(
+        self,
+        source_index_1_based: int,
+        target_index_1_based: int,
+    ) -> Optional[tuple[ProductItem, int, int]]:
+        """
+        Moves one product to an exact 1-based position and shifts the others.
+
+        Example: moving #7 to #1 makes old #1 become #2, old #2 become #3, etc.
+        """
+        total = len(self.products)
+        if not (
+            1 <= source_index_1_based <= total
+            and 1 <= target_index_1_based <= total
+        ):
+            return None
+
+        source_idx = source_index_1_based - 1
+        target_idx = target_index_1_based - 1
+        item = self.products[source_idx]
+        if source_idx != target_idx:
+            item = self.products.pop(source_idx)
+            self.products.insert(target_idx, item)
+            self._save_state()
+        return item, source_index_1_based, target_index_1_based
+
     def remove_product(self, index_1_based: int) -> Optional[ProductItem]:
         """Removes a product by 1-based index."""
         if 1 <= index_1_based <= len(self.products):

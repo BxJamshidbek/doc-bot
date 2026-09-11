@@ -85,7 +85,8 @@ class TelegramDocumentTooLargeError(Exception):
     STATE_WAITING_EDIT_NAME,
     STATE_WAITING_EDIT_BARCODE,
     STATE_WAITING_SWAP_TARGET,
-) = range(8)
+    STATE_WAITING_MOVE_TARGET,
+) = range(9)
 
 # Global session manager
 session_mgr = SessionManager(SESSION_BASE_DIR, GENERATED_BASE_DIR)
@@ -231,6 +232,7 @@ def format_products_list(session: UserSession) -> str:
     lines.append(f"\n📄 *Jami betlar:* {pages} ta (A4, 12 ta/bet)")
     lines.append("✏️ Tuzatish uchun pastdagi mahsulot raqamini bosing yoki `/edit 2` yozing.")
     lines.append("↔️ Joyini almashtirish uchun `/swap 2 7` yozing.")
+    lines.append("📍 Aniq o‘ringa qo‘yish uchun `/move 7 1` yozing — eski #1 avtomatik #2 ga suriladi.")
     return "\n".join(lines)
 
 
@@ -266,6 +268,9 @@ def build_product_edit_keyboard(index: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("↔️ Joyini almashtirish", callback_data=f"swap:{index}"),
+            ],
+            [
+                InlineKeyboardButton("📍 Aniq o‘ringa qo‘yish", callback_data=f"move:{index}"),
             ],
             [
                 InlineKeyboardButton("🗑 O‘chirish", callback_data=f"remove:{index}"),
@@ -354,6 +359,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/list — Ro‘yxatni ko‘rish\n"
         "/edit `<N>` — Mahsulot rasmi, nomi yoki shtrixini tuzatish\n"
         "/swap `<A>` `<B>` — Ikki mahsulot joyini almashtirish (masalan: `/swap 2 7`)\n"
+        "/move `<A>` `<B>` — A-mahsulotni B-o‘ringa qo‘yish, qolganlarini surish (masalan: `/move 7 1`)\n"
         "/remove `<N>` — Mahsulotni o‘chirish (masalan: `/remove 1`)\n"
         "/menu — Pastki katta menyuni qo‘lda ochish\n"
         "/new — Yangi hujjat boshlash va nom berish\n"
@@ -615,6 +621,174 @@ async def swap_target_received(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
+async def send_move_result(
+    *,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    session: UserSession,
+    source_index: int,
+    target_index: int,
+) -> int:
+    """Moves one product to an exact position, confirms the result, and shows the refreshed list."""
+    total = len(session.products)
+    moved = session.move_product_to_position(source_index, target_index)
+    clear_edit_context(context)
+
+    if not moved:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=(
+                f"⚠️ Mahsulot raqami noto‘g‘ri. Sizda jami {total} ta mahsulot bor.\n"
+                "Masalan: `/move 7 1`"
+            ),
+            reply_markup=HIDE_REPLY_KEYBOARD,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ConversationHandler.END
+
+    product, old_position, new_position = moved
+    if old_position == new_position:
+        intro = f"ℹ️ #{old_position} mahsulot shu o‘rinda turibdi. Tartib o‘zgarmadi."
+    else:
+        intro = (
+            f"✅ #{old_position} mahsulot #{new_position}-o‘ringa qo‘yildi.\n"
+            f"📍 #{new_position} endi: *{esc(product.name)}* (`{esc(product.barcode)}`)\n"
+            "Qolgan mahsulotlar avtomatik tartib bilan surildi."
+        )
+
+    await send_products_list_message(
+        context=context,
+        chat_id=update.effective_chat.id,
+        session=session,
+        intro=intro,
+    )
+    return ConversationHandler.END
+
+
+async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles /move A B command or starts an interactive exact-position move."""
+    user_id = update.effective_user.id
+    session = session_mgr.get_session(user_id)
+
+    if not session.products:
+        await update.message.reply_text(
+            "⚠️ Hozircha mahsulotlar ro‘yxati bo‘sh. Avval /add orqali mahsulot qo‘shing.",
+            reply_markup=HIDE_REPLY_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    if not context.args or len(context.args) > 2 or not all(arg.isdigit() for arg in context.args):
+        await update.message.reply_text(
+            "⚠️ Qaysi mahsulotni qaysi o‘ringa qo‘yishni yuboring.\n"
+            "Masalan: `/move 7 1` — #7 mahsulot #1-o‘ringa tushadi, eski #1 #2 ga suriladi.\n\n"
+            "Raqamlarni ko‘rish uchun /list bosing.",
+            reply_markup=HIDE_REPLY_KEYBOARD,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ConversationHandler.END
+
+    source_index = int(context.args[0])
+    if len(context.args) == 1:
+        product = session.get_product(source_index)
+        if not product:
+            await update.message.reply_text(
+                f"⚠️ #{source_index} raqamli mahsulot topilmadi. Sizda jami {len(session.products)} ta mahsulot bor.",
+                reply_markup=HIDE_REPLY_KEYBOARD,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return ConversationHandler.END
+        context.user_data["move_source_index"] = source_index
+        await update.message.reply_text(
+            (
+                f"📍 *#{source_index} mahsulot aniq o‘ringa qo‘yiladi:*\n"
+                f"*{esc(product.name)}* (`{esc(product.barcode)}`)\n\n"
+                f"Qaysi o‘ringa qo‘yamiz? 1 dan {len(session.products)} gacha raqam yuboring.\n"
+                "Masalan: `1` — shu mahsulot birinchi bo‘ladi, qolganlari pastga suriladi.\n\n"
+                "Bekor qilish uchun /cancel bosing."
+            ),
+            reply_markup=HIDE_REPLY_KEYBOARD,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return STATE_WAITING_MOVE_TARGET
+
+    return await send_move_result(
+        update=update,
+        context=context,
+        session=session,
+        source_index=source_index,
+        target_index=int(context.args[1]),
+    )
+
+
+async def move_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts interactive exact-position movement from a product edit inline button."""
+    query = update.callback_query
+    index = parse_index_from_callback(query.data if query else "")
+    user_id = update.effective_user.id
+    session = session_mgr.get_session(user_id)
+
+    if not index:
+        if query:
+            await query.answer("Noto‘g‘ri mahsulot raqami", show_alert=True)
+        return ConversationHandler.END
+
+    product = session.get_product(index)
+    if not product:
+        if query:
+            await query.answer("Mahsulot topilmadi", show_alert=True)
+        return ConversationHandler.END
+
+    context.user_data["move_source_index"] = index
+    await send_prompt(
+        update,
+        context,
+        (
+            f"📍 *#{index} mahsulot aniq o‘ringa qo‘yiladi:*\n"
+            f"*{esc(product.name)}* (`{esc(product.barcode)}`)\n\n"
+            f"Qaysi o‘ringa qo‘yamiz? 1 dan {len(session.products)} gacha raqam yuboring.\n"
+            "Masalan: `1` — shu mahsulot birinchi bo‘ladi, qolganlari pastga suriladi.\n\n"
+            "Bekor qilish uchun /cancel bosing."
+        ),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return STATE_WAITING_MOVE_TARGET
+
+
+async def move_target_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives the target index for an interactive exact-position move."""
+    user_id = update.effective_user.id
+    session = session_mgr.get_session(user_id)
+    source_index = int(context.user_data.get("move_source_index") or 0)
+    raw_text = (update.message.text or "").strip()
+    tokens = raw_text.split()
+    first_token = tokens[0] if tokens else ""
+
+    if not source_index or not session.get_product(source_index):
+        clear_edit_context(context)
+        await update.message.reply_text(
+            "⚠️ Tanlangan mahsulot topilmadi. Iltimos, /list orqali qaytadan tanlang.",
+            reply_markup=HIDE_REPLY_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    if not first_token.isdigit():
+        await update.message.reply_text(
+            f"⚠️ Faqat raqam yuboring. Masalan: `1`.\n"
+            f"Sizda jami {len(session.products)} ta mahsulot bor.",
+            reply_markup=HIDE_REPLY_KEYBOARD,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return STATE_WAITING_MOVE_TARGET
+
+    return await send_move_result(
+        update=update,
+        context=context,
+        session=session,
+        source_index=source_index,
+        target_index=int(first_token),
+    )
+
+
 async def show_product_edit_options(
     *,
     update: Update,
@@ -741,6 +915,7 @@ def clear_edit_context(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("edit_index", None)
     context.user_data.pop("edit_field", None)
     context.user_data.pop("swap_source_index", None)
+    context.user_data.pop("move_source_index", None)
 
 
 async def finish_product_edit(
@@ -1706,6 +1881,7 @@ async def post_init(application) -> None:
         BotCommand("list", "Kiritilgan mahsulotlar ro‘yxati"),
         BotCommand("edit", "Mahsulotni tuzatish"),
         BotCommand("swap", "Ikki mahsulot joyini almashtirish"),
+        BotCommand("move", "Mahsulotni aniq o‘ringa qo‘yish"),
         BotCommand("remove", "N-raqamli mahsulotni o‘chirish"),
         BotCommand("new", "Yangi hujjat boshlash"),
         BotCommand("menu", "Pastki menyuni qo‘lda ochish"),
@@ -1747,6 +1923,7 @@ def create_bot_application() -> object:
             CommandHandler("new", new_document_start),
             CommandHandler("add", add_start),
             CommandHandler("swap", cmd_swap),
+            CommandHandler("move", cmd_move),
             MessageHandler(filters.Regex(r"^(🆕 Yangi hujjat|🆕 /new)$"), new_document_start),
             MessageHandler(filters.Regex(r"^(➕ Keyingi mahsulot|➕ /add)$"), add_start),
             CallbackQueryHandler(new_document_start, pattern="^btn_new$"),
@@ -1755,6 +1932,7 @@ def create_bot_application() -> object:
             CallbackQueryHandler(edit_name_start, pattern=r"^edit_name:\d+$"),
             CallbackQueryHandler(edit_barcode_start, pattern=r"^edit_barcode:\d+$"),
             CallbackQueryHandler(swap_product_start, pattern=r"^swap:\d+$"),
+            CallbackQueryHandler(move_product_start, pattern=r"^move:\d+$"),
         ],
         states={
             STATE_WAITING_DOCUMENT_NAME: [
@@ -1785,6 +1963,9 @@ def create_bot_application() -> object:
             STATE_WAITING_SWAP_TARGET: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, swap_target_received),
             ],
+            STATE_WAITING_MOVE_TARGET: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, move_target_received),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel_in_conv)],
         per_chat=True,
@@ -1810,6 +1991,7 @@ def create_bot_application() -> object:
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("edit", cmd_edit))
     app.add_handler(CommandHandler("swap", cmd_swap))
+    app.add_handler(CommandHandler("move", cmd_move))
     app.add_handler(CommandHandler("remove", cmd_remove))
     app.add_handler(CommandHandler("preview", cmd_preview))
     app.add_handler(CommandHandler("finish", cmd_finish))

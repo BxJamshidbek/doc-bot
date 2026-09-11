@@ -216,6 +216,49 @@ class TestSessionManager(unittest.TestCase):
         self.assertIsNone(session.swap_products(1, 3))
         self.assertEqual([p.name for p in session.products], ["First", "Second"])
 
+    def test_move_product_to_position_shifts_down_and_persists_order(self):
+        session = self.mgr.get_session(12345)
+        image_paths = []
+        for index in range(1, 4):
+            image_path = session.session_dir / f"move-down-{index}.png"
+            image_path.write_text(f"image-{index}", encoding="utf-8")
+            image_paths.append(str(image_path))
+        session.add_product("First", "1", image_paths[0])
+        session.add_product("Second", "2", image_paths[1])
+        session.add_product("Third", "3", image_paths[2])
+
+        moved = session.move_product_to_position(3, 1)
+
+        self.assertIsNotNone(moved)
+        self.assertEqual([p.name for p in session.products], ["Third", "First", "Second"])
+        self.assertEqual([p.barcode for p in session.products], ["3", "1", "2"])
+        self.assertEqual([p.image_path for p in session.products], [image_paths[2], image_paths[0], image_paths[1]])
+
+        reloaded = SessionManager(self.session_base, self.generated_base).get_session(12345)
+        self.assertEqual([p.name for p in reloaded.products], ["Third", "First", "Second"])
+
+    def test_move_product_to_position_shifts_up(self):
+        session = self.mgr.get_session(12345)
+        session.add_product("First", "1", "/fake/1.png")
+        session.add_product("Second", "2", "/fake/2.png")
+        session.add_product("Third", "3", "/fake/3.png")
+
+        moved = session.move_product_to_position(1, 3)
+
+        self.assertIsNotNone(moved)
+        self.assertEqual([p.name for p in session.products], ["Second", "Third", "First"])
+        self.assertEqual([p.barcode for p in session.products], ["2", "3", "1"])
+
+    def test_move_product_to_position_rejects_invalid_indexes(self):
+        session = self.mgr.get_session(12345)
+        session.add_product("First", "1", "/fake/1.png")
+        session.add_product("Second", "2", "/fake/2.png")
+
+        self.assertIsNone(session.move_product_to_position(0, 1))
+        self.assertIsNone(session.move_product_to_position(1, 0))
+        self.assertIsNone(session.move_product_to_position(1, 3))
+        self.assertEqual([p.name for p in session.products], ["First", "Second"])
+
     def test_remove_product(self):
         session = self.mgr.get_session(12345)
         session.add_product("First", "1", "/fake/1.png")
@@ -529,6 +572,23 @@ class TestDocxGeneration(unittest.TestCase):
         self.assertEqual(doc.tables[0].cell(0, 1).paragraphs[1].text, "Second")
         self.assertEqual(doc.tables[0].cell(0, 2).paragraphs[1].text, "First")
 
+    def test_docx_uses_moved_session_order(self):
+        mgr = SessionManager(self.temp_dir / "sessions", self.temp_dir / "generated")
+        session = mgr.get_session(778)
+        session.add_product("First", "111", str(self.img_path))
+        session.add_product("Second", "222", str(self.img_path))
+        session.add_product("Third", "333", str(self.img_path))
+        session.move_product_to_position(3, 1)
+
+        doc_path = self.temp_dir / "moved.docx"
+        created = create_label_sheet(session.products, doc_path)
+        doc = docx.Document(created)
+
+        self.assertEqual(doc.tables[0].cell(0, 0).paragraphs[1].text, "Third")
+        self.assertEqual(doc.tables[0].cell(0, 0).paragraphs[3].text, "333")
+        self.assertEqual(doc.tables[0].cell(0, 1).paragraphs[1].text, "First")
+        self.assertEqual(doc.tables[0].cell(0, 2).paragraphs[1].text, "Second")
+
 
 class TestBotEscaping(unittest.TestCase):
     def test_markdown_escaping(self):
@@ -572,6 +632,7 @@ class TestBotEscaping(unittest.TestCase):
             list_text = format_products_list(session)
             self.assertIn("/edit 2", list_text)
             self.assertIn("/swap 2 7", list_text)
+            self.assertIn("/move 7 1", list_text)
             self.assertIn("Perexod", list_text)
 
             keyboard = build_products_keyboard(session)
@@ -592,7 +653,7 @@ class TestBotEscaping(unittest.TestCase):
             ]
             self.assertEqual(
                 edit_callbacks,
-                ["edit_photo:2", "edit_name:2", "edit_barcode:2", "swap:2", "remove:2", "btn_list"],
+                ["edit_photo:2", "edit_name:2", "edit_barcode:2", "swap:2", "move:2", "remove:2", "btn_list"],
             )
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
